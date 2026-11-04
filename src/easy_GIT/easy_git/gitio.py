@@ -176,7 +176,8 @@ def unstage(repo: Path, change: FileChange) -> None:
     if _head(repo):
         run_git(repo, "restore", "--staged", "--", *_paths(change))
     else:
-        run_git(repo, "rm", "--cached", "-q", "--", change.path)
+        # -f: stage 뒤 또 고친 파일도 뺀다. --cached 라 작업 폴더 파일은 그대로다.
+        run_git(repo, "rm", "--cached", "-f", "-q", "--", change.path)
 
 
 def commit(repo: Path, message: str) -> tuple[bool, str]:

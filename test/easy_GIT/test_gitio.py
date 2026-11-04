@@ -94,6 +94,13 @@ def test_unstage_in_empty_repo(repo):
     staged, unstaged = working_changes(repo)
     assert (staged, [(f.path, f.status) for f in unstaged]) == ([], [("n.txt", "A")])
 
+def test_unstage_in_empty_repo_after_edit_keeps_file(repo):
+    write(repo, "n.txt", "a\n"); git(repo, "add", "."); write(repo, "n.txt", "a\nb\n")
+    unstage(repo, working_changes(repo)[0][0])
+    staged, unstaged = working_changes(repo)
+    assert (staged, [(f.path, f.status, f.added) for f in unstaged]) == ([], [("n.txt", "A", 2)])
+    assert (repo / "n.txt").read_text() == "a\nb\n"
+
 def test_commit_success_with_korean_message(repo):
     write(repo, "a.txt", "1\n"); git(repo, "add", ".")
     ok, _ = commit(repo, "첫 커밋")

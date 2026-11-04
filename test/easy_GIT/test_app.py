@@ -1,16 +1,22 @@
 import asyncio
 
-from textual.widgets import OptionList
+from textual.widgets import Input, OptionList
 
-from easy_git.app import EasyGitApp, layout_for, rel_time
+from easy_git import gitio
+from easy_git.app import CommitScreen, EasyGitApp, ResultScreen, layout_for, rel_time
 from easy_git.diffview import DiffView
+from easy_git.gitio import commits, working_changes
 from conftest import git, write
 
 
 async def settle(app, pilot):
-    for _ in range(2):
-        await app.workers.wait_for_complete()
+    # 두 번은 기다리고, 뒤따라 생긴 worker(폴링이 부른 reload 등)가 남아 있으면 최대 5번까지 더 기다린다.
+    # exclusive worker 는 뒤 요청에 밀려 취소될 수 있다(의도된 동작). 취소된 것 때문에 멈추지 않게 예외를 모은다.
+    for i in range(5):
+        await asyncio.gather(*(w.wait() for w in app.workers), return_exceptions=True)
         await pilot.pause()
+        if i >= 1 and not app.workers:
+            break
 
 
 def _repo_with_change(repo):
@@ -131,5 +137,152 @@ def test_narrow_pages_between_list_and_diff(repo):
             assert (app.narrow_page, left.display, right.display) == ("diff", False, True)
             await pilot.press("escape"); await settle(app, pilot)
             assert app.narrow_page == "list" and app.focused is files
+
+    asyncio.run(run())
+
+
+def test_space_stages_highlighted_unstaged_file(repo):
+    _repo_with_change(repo)
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            files = app.query_one("#files", OptionList)
+            assert files.highlighted_option.id == "unstaged:config.py"
+            await pilot.press("space"); await settle(app, pilot)
+            assert [f.path for f in working_changes(repo)[0]] == ["config.py"]
+            assert "staged:config.py" in [files.get_option_at_index(i).id for i in range(files.option_count)]
+
+    asyncio.run(run())
+
+
+def test_commit_flow_with_korean_message(repo):
+    _repo_with_change(repo)
+    git(repo, "add", "config.py")
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("c"); await settle(app, pilot)
+            assert isinstance(app.screen, CommitScreen)
+            app.screen.query_one(Input).value = "테스트 커밋"
+            await pilot.press("enter"); await settle(app, pilot)
+            assert commits(repo)[0].subject == "테스트 커밋"
+            assert app.screen is app.screen_stack[0]
+
+    asyncio.run(run())
+
+
+def test_commit_failure_shows_git_output(repo):
+    _repo_with_change(repo)
+    git(repo, "add", "config.py")
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho hook says no >&2\nexit 1\n", newline="\n")
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("c"); await settle(app, pilot)
+            app.screen.query_one(Input).value = "x"
+            await pilot.press("enter"); await settle(app, pilot)
+            assert isinstance(app.screen, ResultScreen) and "hook says no" in app.screen.text
+
+    asyncio.run(run())
+
+
+def test_commit_with_nothing_staged_does_not_open_input(repo):
+    _repo_with_change(repo)
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("c"); await settle(app, pilot)
+            assert not isinstance(app.screen, CommitScreen)
+
+    asyncio.run(run())
+
+
+def test_auto_refresh_picks_up_external_edit(repo):
+    _repo_with_change(repo)
+
+    async def run():
+        app = EasyGitApp(repo, poll_interval=0.1)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            diff = app.query_one(DiffView)
+            write(repo, "config.py", "".join(("CHANGED\n" if i == 5 else "AGENT\n" if i == 9 else f"line{i}\n") for i in range(1, 11)))
+            for _ in range(30):
+                await pilot.pause(0.1); await settle(app, pilot)
+                if any(r.text == "AGENT" for r in diff.rows):
+                    break
+            assert any(r.text == "AGENT" for r in diff.rows)
+
+    asyncio.run(run())
+
+
+def test_refresh_keeps_selection_and_scroll(repo):
+    write(repo, "long.txt", "".join(f"line{i}\n" for i in range(1, 201)))
+    write(repo, "other.txt", "a\n")
+    git(repo, "add", "."); git(repo, "commit", "-m", "c1")
+    write(repo, "long.txt", "".join(("FIRST\n" if i == 1 else f"line{i}\n") for i in range(1, 201)))
+    write(repo, "other.txt", "b\n")
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            files = app.query_one("#files", OptionList)
+            diff = app.query_one(DiffView)
+            files.highlighted = files.get_option_index("unstaged:long.txt"); await settle(app, pilot)
+            diff.scroll_to(y=50, animate=False); await pilot.pause()
+            write(repo, "other.txt", "c\n")
+            app.reload(); await settle(app, pilot)
+            assert files.highlighted_option.id == "unstaged:long.txt" and diff.scroll_y == 50
+
+    asyncio.run(run())
+
+
+def test_poll_survives_git_error(repo, monkeypatch):
+    _repo_with_change(repo)
+
+    def boom(*args, **kwargs):
+        raise gitio.GitError("index.lock")
+
+    async def run():
+        app = EasyGitApp(repo, poll_interval=0.1)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            diff = app.query_one(DiffView)
+            rows = diff.rows
+            monkeypatch.setattr(gitio, "snapshot", boom)
+            await settle(app, pilot)  # 패치 전에 이미 돌던 폴링이 끝나기를 기다린다
+            write(repo, "config.py", "changed again\n")
+            await pilot.pause(0.5)
+            assert app.is_running and diff.rows == rows
+
+    asyncio.run(run())
+
+
+def test_git_errors_from_user_keys_are_notified(repo, monkeypatch):
+    _repo_with_change(repo)
+
+    def boom(*args, **kwargs):
+        raise gitio.GitError("fatal: index.lock exists")
+
+    async def run():
+        app = EasyGitApp(repo)
+        notes = []
+        app.notify = lambda message, **kwargs: notes.append(message)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            monkeypatch.setattr(gitio, "stage", boom)
+            await pilot.press("space"); await settle(app, pilot)
+            monkeypatch.setattr(gitio, "working_changes", boom)
+            await pilot.press("r"); await settle(app, pilot)
+            assert app.is_running and notes == ["fatal: index.lock exists"] * 2
 
     asyncio.run(run())
