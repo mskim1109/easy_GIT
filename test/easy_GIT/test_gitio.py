@@ -1,6 +1,8 @@
 from conftest import git, write
 from easy_git.fulldiff import Row
-from easy_git.gitio import commit_changes, commits, decode_text, file_rows, repo_root, working_changes
+from easy_git.gitio import (
+    commit, commit_changes, commits, decode_text, file_rows, repo_root, snapshot, stage, unstage, working_changes,
+)
 
 
 def test_repo_root_from_subdir(repo, tmp_path):
@@ -72,3 +74,53 @@ def test_mixed_encoding_old_utf8_new_cp949(repo):
 def test_decode_text():
     assert decode_text("한글".encode("cp949")) == "한글"
     assert decode_text("﻿abc".encode("utf-8")) == "abc"
+
+def _partly_staged(repo):
+    write(repo, "a.txt", "x\n"); git(repo, "add", "."); git(repo, "commit", "-m", "c1")
+    write(repo, "a.txt", "x\ny\n"); git(repo, "add", "a.txt"); write(repo, "a.txt", "x\ny\nz\n")
+
+def test_stage_and_unstage_whole_file(repo):
+    _partly_staged(repo)
+    stage(repo, working_changes(repo)[1][0])
+    staged, unstaged = working_changes(repo)
+    assert ([f.added for f in staged], unstaged) == ([2], [])
+    unstage(repo, staged[0])
+    staged, unstaged = working_changes(repo)
+    assert (staged, [f.path for f in unstaged]) == ([], ["a.txt"])
+
+def test_unstage_in_empty_repo(repo):
+    write(repo, "n.txt", "a\n"); git(repo, "add", ".")
+    unstage(repo, working_changes(repo)[0][0])
+    staged, unstaged = working_changes(repo)
+    assert (staged, [(f.path, f.status) for f in unstaged]) == ([], [("n.txt", "A")])
+
+def test_commit_success_with_korean_message(repo):
+    write(repo, "a.txt", "1\n"); git(repo, "add", ".")
+    ok, _ = commit(repo, "첫 커밋")
+    assert ok and commits(repo)[0].subject == "첫 커밋"
+
+def test_commit_refuses_empty_message_or_nothing_staged(repo):
+    write(repo, "a.txt", "1\n"); git(repo, "add", ".")
+    assert commit(repo, "   ") == (False, "커밋 메시지가 비어 있습니다.")
+    git(repo, "commit", "-m", "c1")
+    assert commit(repo, "x") == (False, "Stage된 파일이 없습니다.")
+
+def test_commit_runs_pre_commit_hook_and_shows_output(repo):
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho hook says no >&2\nexit 1\n", newline="\n")
+    write(repo, "a.txt", "1\n"); git(repo, "add", ".")
+    ok, out = commit(repo, "x")
+    assert not ok and "hook says no" in out and commits(repo) == []
+
+def test_snapshot_changes_when_modified_file_is_edited_again(repo):
+    write(repo, "a.txt", "1\n"); git(repo, "add", "."); git(repo, "commit", "-m", "c1")
+    write(repo, "a.txt", "2\n")
+    s1 = snapshot(repo)
+    assert snapshot(repo) == s1
+    write(repo, "a.txt", "22\n")
+    assert snapshot(repo) != s1
+
+def test_snapshot_changes_on_new_commit(repo):
+    write(repo, "a.txt", "1\n"); git(repo, "add", ".")
+    s1 = snapshot(repo); git(repo, "commit", "-m", "c1")
+    assert snapshot(repo) != s1
