@@ -17,7 +17,7 @@ from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
 from easy_git import gitio
-from easy_git.diffview import DiffView
+from easy_git.diffview import DiffView, colored
 
 NARROW_BELOW = 90
 SIDE_FROM = 160
@@ -338,16 +338,17 @@ class EasyGitApp(App):
             index = pick([k for k, _, _ in entries], file_id, file_index)
             change = entries[index][2] if index is not None else None  # 폴더면 None
             rows = gitio.file_rows(self.repo, change) if change else []
+            colors = colored(rows, change.path) if rows else None  # 색칠은 여기(worker)서: 큰 파일은 오래 걸린다
         except GIT_ERRORS as e:
             self._git_failed(e, quiet)
             return
         if not get_current_worker().is_cancelled:
             self.call_from_thread(
                 self._apply_reload, selection, quiet, commits, staged, unstaged,
-                chosen.sha if chosen else "WORKING", message, entries, index, rows, commit_changes,
+                chosen.sha if chosen else "WORKING", message, entries, index, rows, commit_changes, colors,
             )
 
-    def _apply_reload(self, selection, quiet, commits, staged, unstaged, commit_id, message, entries, index, rows, commit_changes) -> None:
+    def _apply_reload(self, selection, quiet, commits, staged, unstaged, commit_id, message, entries, index, rows, commit_changes, colors) -> None:
         if self._selection() != selection:
             # 읽는 동안 사용자가 다른 항목으로 옮겼다. 그 선택으로 다시 읽는다.
             self.reload(quiet)
@@ -359,7 +360,8 @@ class EasyGitApp(App):
             self._fill_files(message, entries, index)
         if index is not None and entries[index][2] is None:
             return  # 폴더에 있었다: 본문은 그대로 둔다
-        self.query_one(DiffView).show(rows, self._shown_mode(), keep_scroll=same_file)
+        path = entries[index][2].path if index is not None else ""
+        self.query_one(DiffView).show(rows, self._shown_mode(), keep_scroll=same_file, path=path, colors=colors)
 
     def _poll(self) -> None:
         # 이전 확인이 아직 돌고 있으면 이번 주기는 건너뛴다 (스레드가 쌓이지 않게)
@@ -455,11 +457,12 @@ class EasyGitApp(App):
     def load_rows(self, change: gitio.FileChange) -> None:
         try:
             rows = gitio.file_rows(self.repo, change)
+            colors = colored(rows, change.path) if rows else None  # 색칠은 여기(worker)서
         except GIT_ERRORS as e:
             self._git_failed(e)
             return
         if not get_current_worker().is_cancelled:
-            self.call_from_thread(lambda: self.query_one(DiffView).show(rows, self._shown_mode()))
+            self.call_from_thread(lambda: self.query_one(DiffView).show(rows, self._shown_mode(), path=change.path, colors=colors))
 
     # --- 키 ---
 
