@@ -1,7 +1,7 @@
 """File_viewer 화면: 왼쪽 파일 트리 + 오른쪽 탭."""
 from pathlib import Path
 
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -12,6 +12,11 @@ import file_viewer.shellops as shellops
 from file_viewer.viewer import FileTab
 
 MARK_COLOR = {"M": "#e2c08d", "•": "#e2c08d", "+": "#73c991"}
+# ponytail: 기준 80열은 짐작. 실제 Herdr 칸에서 보고 조정
+NARROW_BELOW = 80  # 이보다 좁으면 트리를 숨기고 t 로 트리 화면 ↔ 내용 화면
+TREE_MIN = 16
+TREE_STEP = 4
+CONTENT_MIN = 30
 
 
 class FileTree(DirectoryTree):
@@ -51,6 +56,9 @@ class FileViewerApp(App):
         Binding("tab", "next_tab", "다음 탭", priority=True),
         Binding("shift+tab", "previous_tab", "이전 탭", priority=True, show=False),
         Binding("w", "close_tab", "탭 닫기"),
+        Binding("t", "toggle_tree", "트리"),
+        Binding("left_square_bracket", f"tree_width({-TREE_STEP})", "트리 좁게", key_display="["),
+        Binding("right_square_bracket", f"tree_width({TREE_STEP})", "트리 넓게", key_display="]"),
         Binding("v", "toggle_md", "md 보기"),
         Binding("o", "open_external", "열기"),
         Binding("q", "quit", "종료"),
@@ -63,6 +71,9 @@ class FileViewerApp(App):
         self.tab_ids: dict[Path, str] = {}
         self._tab_no = 0
         self.tree_width = 32
+        self.narrow = False
+        self.tree_shown = True  # 넓을 때 사용자가 고른 값
+        self.tree_screen = False  # 좁을 때 트리 화면을 보고 있는지
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -78,6 +89,35 @@ class FileViewerApp(App):
         tabs.mount(Static("왼쪽 트리에서 파일을 고르세요", id="empty"),
                    before=tabs.get_child_by_type(ContentSwitcher))
         self._load_state(self.query_one("#tree", FileTree))
+        self.apply_layout()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.apply_layout(event.size.width)  # 이 시점의 self.size 는 아직 옛 값이다
+
+    def apply_layout(self, width: int | None = None) -> None:
+        tree, tabs = self.query_one("#tree", FileTree), self.query_one("#tabs")
+        self.narrow = (width or self.size.width) < NARROW_BELOW
+        if self.narrow:
+            tree.display, tabs.display = self.tree_screen, not self.tree_screen
+            tree.styles.width = "1fr"
+        else:
+            tree.display, tabs.display = self.tree_shown, True
+            tree.styles.width = self.tree_width
+
+    def action_toggle_tree(self) -> None:
+        if self.narrow:
+            self.tree_screen = shown = not self.tree_screen
+        else:
+            self.tree_shown = shown = not self.tree_shown
+        self.apply_layout()
+        if shown:
+            self.query_one("#tree").focus()
+
+    def action_tree_width(self, step: int) -> None:
+        if self.narrow:
+            return
+        self.tree_width = max(TREE_MIN, min(self.size.width - CONTENT_MIN, self.tree_width + step))
+        self.apply_layout()
 
     @work(thread=True, exclusive=True, group="git")
     def _load_state(self, tree: FileTree) -> None:
@@ -100,6 +140,9 @@ class FileViewerApp(App):
             self.tab_ids[path] = f"t{self._tab_no}"
         # 탭 붙이기는 비동기라 메시지 순서대로 처리되게 미룬다.
         self.call_later(self._show_tab, path, new)
+        if self.narrow:
+            self.tree_screen = False
+        self.apply_layout()
 
     async def _show_tab(self, path: Path, new: bool) -> None:
         pane_id = self.tab_ids.get(path)

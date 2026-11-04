@@ -144,3 +144,42 @@ def test_tree_labels_mark_and_dim(repo):
         assert any("dim" in str(s.style) for s in label("build").spans)
         assert not any("dim" in str(s.style) for s in label("notes.md").spans)
     run(repo, body)
+
+
+def test_narrow_hides_tree_and_t_switches(repo):
+    _files(repo)
+    async def body(app, pilot):
+        tree, tabs = app.query_one("#tree"), app.query_one("#tabs")
+        assert app.narrow and not tree.display and tabs.display
+        await pilot.press("t"); await settle(app, pilot)
+        assert tree.display and not tabs.display
+        await _open(app, pilot, repo / "config.json")
+        assert not tree.display and tabs.display
+    run(repo, body, size=(60, 30))
+
+
+def test_resize_switches_layout(repo):
+    async def body(app, pilot):
+        tree = app.query_one("#tree")
+        assert tree.display
+        await pilot.resize_terminal(60, 30); await settle(app, pilot)
+        assert not tree.display
+        await pilot.resize_terminal(120, 40); await settle(app, pilot)
+        assert tree.display
+    run(repo, body)
+
+
+def test_t_and_brackets_in_wide(repo):
+    async def body(app, pilot):
+        tree = app.query_one("#tree")
+        await pilot.press("]"); await settle(app, pilot)
+        assert app.tree_width == 36
+        for _ in range(6):
+            await pilot.press("[")
+        await settle(app, pilot)
+        assert app.tree_width == 16
+        await pilot.press("t"); await settle(app, pilot)
+        assert not tree.display and not app.tree_shown
+        await pilot.press("t"); await settle(app, pilot)
+        assert tree.display
+    run(repo, body)
