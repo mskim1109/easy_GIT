@@ -1,4 +1,4 @@
-from file_viewer.files import Loaded, kind_of, load, md_for_view, save, stat_key
+from file_viewer.files import Loaded, find_candidates, kind_of, load, md_for_view, save, stat_key
 
 from conftest import write
 
@@ -42,3 +42,16 @@ def test_kind_of(tmp_path):
 def test_stat_key_and_md_for_view(tmp_path):
     assert stat_key(tmp_path / "없음.txt") is None
     assert md_for_view("앞 ![구조도](a.png) 뒤\n![](b.png)") == "앞 [그림: 구조도] 뒤\n[그림]"
+
+
+def test_find_skips_ignored_dirs(repo):
+    write(repo, ".gitignore", "node_modules/\n"); write(repo, "docs/design.md", "x")
+    write(repo, "node_modules/p/index.js", "x"); write(repo, "새파일.txt", "x")
+    got = find_candidates(repo)
+    assert "docs/design.md" in got and "새파일.txt" in got and ".gitignore" in got
+    assert not any(p.startswith("node_modules/") for p in got)
+
+
+def test_find_candidates_without_git(tmp_path):
+    write(tmp_path, "plain/a.txt", "x"); write(tmp_path, "plain/.git/HEAD", "x")
+    assert find_candidates(tmp_path / "plain") == ["a.txt"]

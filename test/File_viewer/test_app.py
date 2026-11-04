@@ -4,7 +4,10 @@ from rich.style import Style
 
 import file_viewer.files as files
 import file_viewer.shellops as shellops
-from file_viewer.app import FileTree, FileViewerApp
+from textual.command import CommandList, CommandPalette
+from textual.widgets import OptionList
+
+from file_viewer.app import FileTree, FileViewerApp, MenuScreen
 
 from conftest import git, settle, wait_until, write
 
@@ -182,4 +185,77 @@ def test_t_and_brackets_in_wide(repo):
         assert not tree.display and not app.tree_shown
         await pilot.press("t"); await settle(app, pilot)
         assert tree.display
+    run(repo, body)
+
+
+async def _choose(app, pilot, option_id):
+    ol = app.screen.query_one(OptionList)
+    ol.highlighted = ol.get_option_index(option_id)
+    await pilot.press("enter"); await settle(app, pilot)
+
+
+def test_slash_finds_and_opens(repo):
+    write(repo, "docs/design.md", "# 설계\n"); write(repo, "a.txt", "x\n")
+    async def body(app, pilot):
+        await pilot.press("slash"); await settle(app, pilot)
+        assert isinstance(app.screen, CommandPalette)
+        for ch in "desi":
+            await pilot.press(ch)
+        await wait_until(lambda: app.screen.query_one(CommandList).highlighted is not None, app, pilot, timeout=5)
+        await pilot.press("enter")
+        await wait_until(lambda: app.current_tab is not None, app, pilot)
+        assert app.current_tab.path == repo / "docs" / "design.md"
+    run(repo, body)
+
+
+def test_m_menu_copy_path(repo, monkeypatch):
+    _files(repo)
+    copied = []
+    monkeypatch.setattr(shellops, "copy_text", copied.append)
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "config.json")
+        app.current_tab.query_one("#body").focus()
+        await pilot.press("m"); await settle(app, pilot)
+        assert isinstance(app.screen, MenuScreen) and app.screen.path == repo / "config.json"
+        await _choose(app, pilot, "copy")
+        assert copied == [str(repo / "config.json")]
+    run(repo, body)
+
+
+def test_m_on_tree_uses_tree_cursor(repo, monkeypatch):
+    _files(repo)
+    revealed = []
+    monkeypatch.setattr(shellops, "reveal", revealed.append)
+    async def body(app, pilot):
+        tree = app.query_one("#tree", FileTree)
+        await wait_until(lambda: len(tree.root.children) > 0, app, pilot)
+        tree.focus()
+        tree.move_cursor(_node(tree, "config.json"))
+        await pilot.press("m"); await settle(app, pilot)
+        await _choose(app, pilot, "reveal")
+        assert revealed == [repo / "config.json"]
+    run(repo, body)
+
+
+def test_right_click_on_tree_opens_menu_for_that_row(repo):
+    # 루트에 .git, a.txt, b.txt 만 → 줄 0 루트, 1 .git, 2 a.txt
+    write(repo, "a.txt", "a\n"); write(repo, "b.txt", "b\n")
+    async def body(app, pilot):
+        tree = app.query_one("#tree", FileTree)
+        await wait_until(lambda: len(tree.root.children) == 3, app, pilot)
+        await pilot.click(FileTree, offset=(4, 2), button=3); await settle(app, pilot)
+        assert isinstance(app.screen, MenuScreen) and app.screen.path == repo / "a.txt"
+        assert app.current_tab is None  # 우클릭이 파일을 열지 않는다
+        await pilot.press("escape"); await settle(app, pilot)
+        assert not isinstance(app.screen, MenuScreen)
+    run(repo, body)
+
+
+def test_right_click_on_tab_opens_menu_for_that_file(repo):
+    _files(repo)
+    async def body(app, pilot):
+        tab = await _open(app, pilot, repo / "config.json")
+        await _open(app, pilot, repo / "notes.md")
+        await pilot.click(app.query_one("#tabs").get_tab(tab.id), button=3); await settle(app, pilot)
+        assert isinstance(app.screen, MenuScreen) and app.screen.path == repo / "config.json"
     run(repo, body)

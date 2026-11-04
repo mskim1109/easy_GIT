@@ -1,9 +1,12 @@
 """파일 읽기·저장·종류 판별. 원래 인코딩과 줄 끝을 지킨다."""
 import codecs
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+import file_viewer.gitstate as gitstate
 
 Kind = Literal["code", "md", "html", "binary"]
 
@@ -65,3 +68,19 @@ def stat_key(path: Path) -> tuple[int, int] | None:
 
 def md_for_view(text: str) -> str:
     return _IMAGE.sub(lambda m: f"[그림: {m[1]}]" if m[1] else "[그림]", text)
+
+
+def find_candidates(root: Path) -> list[str]:
+    """이름 찾기 후보. git 저장소면 git 이 무시하는 폴더 안은 들어가지 않는다."""
+    try:
+        out = gitstate.run_git(root, "ls-files", "-co", "--exclude-standard", "-z")
+    except FileNotFoundError:  # git 이 없음
+        out = None
+    if out is not None and out.returncode == 0:
+        return sorted(p for p in out.stdout.decode("utf-8", "replace").split("\0") if p)
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        base = Path(dirpath).relative_to(root).as_posix()
+        found += [f if base == "." else f"{base}/{f}" for f in filenames]
+    return sorted(found)

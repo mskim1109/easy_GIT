@@ -1,12 +1,19 @@
 """File_viewer 화면: 왼쪽 파일 트리 + 오른쪽 탭."""
+import asyncio
+import subprocess
+from functools import partial
 from pathlib import Path
 
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import CommandPalette, Hit, Hits, Provider
 from textual.containers import Horizontal
-from textual.widgets import ContentSwitcher, DirectoryTree, Footer, Static, TabbedContent, Tabs
+from textual.screen import ModalScreen
+from textual.widgets import ContentSwitcher, DirectoryTree, Footer, OptionList, Static, TabbedContent, Tabs
+from textual.widgets.option_list import Option
 
+import file_viewer.files as files
 import file_viewer.gitstate as gitstate
 import file_viewer.shellops as shellops
 from file_viewer.viewer import FileTab
@@ -45,6 +52,60 @@ class FileTree(DirectoryTree):
         self._clear_line_cache()
         self.refresh()
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 3:
+            return
+        offset = event.get_content_offset(self)
+        node = None if offset is None else self.get_node_at_line(offset.y + int(self.scroll_offset.y))
+        if node is None or node.data is None:
+            return
+        event.stop()
+        self.move_cursor(node)
+        self.app.open_menu(node.data.path)
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button == 3:
+            event.prevent_default()  # Tree 기본 클릭(커서 줄 선택 → 파일 열기)을 막는다
+
+
+class FileProvider(Provider):
+    """/ 키 팔레트: 파일 이름으로 찾기."""
+
+    async def startup(self) -> None:
+        # ponytail: 열 때마다 전체 목록을 다시 모음. 파일 수십만 개면 캐시
+        self._paths = await asyncio.to_thread(files.find_candidates, self.app.root)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for rel in self._paths:
+            score = matcher.match(rel)
+            if score > 0:
+                yield Hit(score, matcher.highlight(rel), partial(self.app.open_file, self.app.root / rel), text=rel)
+
+
+class MenuScreen(ModalScreen[str | None]):
+    """우클릭·m 메뉴."""
+
+    DEFAULT_CSS = """
+    MenuScreen { align: center middle; }
+    MenuScreen > OptionList { width: 36; height: auto; border: round $accent; }
+    """
+    BINDINGS = [Binding("escape", "close", "닫기")]
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path = path
+
+    def compose(self) -> ComposeResult:
+        yield OptionList(Option("탐색기에서 열기", id="reveal"), Option("경로 복사", id="copy"),
+                         Option("기본 프로그램으로 열기", id="open"))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
 
 class FileViewerApp(App):
     CSS = """
@@ -52,7 +113,9 @@ class FileViewerApp(App):
     #tabs > ContentSwitcher { height: 1fr; }
     #empty { color: $text-muted; padding: 1 2; }
     """
+    ENABLE_COMMAND_PALETTE = False  # ctrl+p 기본 팔레트 대신 / 로 파일 찾기
     BINDINGS = [
+        Binding("slash", "find", "찾기", key_display="/"),
         Binding("tab", "next_tab", "다음 탭", priority=True),
         Binding("shift+tab", "previous_tab", "이전 탭", priority=True, show=False),
         Binding("w", "close_tab", "탭 닫기"),
@@ -61,6 +124,7 @@ class FileViewerApp(App):
         Binding("right_square_bracket", f"tree_width({TREE_STEP})", "트리 넓게", key_display="]"),
         Binding("v", "toggle_md", "md 보기"),
         Binding("o", "open_external", "열기"),
+        Binding("m", "menu", "메뉴"),
         Binding("q", "quit", "종료"),
     ]
 
@@ -191,3 +255,41 @@ class FileViewerApp(App):
     def action_open_external(self) -> None:
         if self.current_tab:
             self.open_external(self.current_tab.path)
+
+    def action_find(self) -> None:
+        self.push_screen(CommandPalette(providers=[FileProvider], placeholder="파일 이름으로 찾기"))
+
+    def action_menu(self) -> None:
+        tree = self.query_one("#tree", FileTree)
+        if tree.has_focus and tree.cursor_node is not None and tree.cursor_node.data is not None:
+            self.open_menu(tree.cursor_node.data.path)
+        elif self.current_tab:
+            self.open_menu(self.current_tab.path)
+
+    def open_menu(self, path: Path) -> None:
+        def done(choice: str | None) -> None:
+            try:
+                if choice == "reveal":
+                    shellops.reveal(path)
+                elif choice == "copy":
+                    shellops.copy_text(str(path))
+                    self.notify("경로를 복사했습니다")
+                elif choice == "open":
+                    self.open_external(path)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.notify(f"실패: {e}", severity="error")
+        self.push_screen(MenuScreen(path), done)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """탭 머리 우클릭 → 그 탭 파일의 메뉴. 트리 우클릭은 FileTree 가 처리한다."""
+        if event.button != 3 or event.widget is None:
+            return
+        tabs = self.query_one("#tabs", TabbedContent)
+        for path, pane_id in self.tab_ids.items():
+            try:
+                hit = tabs.get_tab(pane_id) is event.widget
+            except Exception:  # 아직 붙지 않은 탭
+                continue
+            if hit:
+                self.open_menu(path)
+                return
