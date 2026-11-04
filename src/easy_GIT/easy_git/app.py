@@ -4,11 +4,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
@@ -18,10 +21,12 @@ from easy_git.diffview import DiffView
 
 NARROW_BELOW = 90
 SIDE_FROM = 160
+MIN_LEFT, MIN_RIGHT, MIN_LIST = 20, 30, 3  # 마우스로 끌 때 칸이 사라지지 않게 하는 최소 크기
 WORKING_MESSAGE = "작업 중인 변경 (커밋 전)"
 GIT_ERRORS = (gitio.GitError, OSError)
 
-# 파일 목록 한 줄: (옵션 id 또는 묶음 제목이면 None, 화면 문구, 파일)
+# 파일 목록 한 줄: (옵션 id 또는 묶음 제목이면 None, 화면 문구, 파일 — 폴더·제목이면 None)
+# 폴더 id 는 "dir:{group}:{폴더 경로}", 파일 id 는 "{group}:{파일 경로}"
 Entry = tuple[str | None, str, gitio.FileChange | None]
 
 
@@ -44,10 +49,46 @@ def layout_for(width: int) -> str:
     return "wide" if width >= SIDE_FROM else "medium"
 
 
-def file_label(f: gitio.FileChange) -> str:
-    path = f"{f.old_path} → {f.path}" if f.old_path else f.path
+def file_label(f: gitio.FileChange, name: str) -> str:
+    renamed = f" ← {f.old_path}" if f.old_path else ""
     nums = "바이너리" if f.binary else f"+{f.added} -{f.deleted}"
-    return f"{f.status} {path}  {nums}"
+    return f"{f.status} {name}{renamed}  {nums}"
+
+
+def tree_entries(changes: list[gitio.FileChange], collapsed: set[str]) -> list[Entry]:
+    """한 묶음의 파일들을 폴더 트리로. 폴더가 먼저, 하위 폴더 하나뿐인 폴더는 한 줄로 합친다."""
+    root: dict = {}
+    for f in changes:
+        *dirs, name = f.path.split("/")
+        node = root
+        for d in dirs:
+            node = node.setdefault(d + "/", {})
+        node[name] = f
+    entries: list[Entry] = []
+
+    def walk(node: dict, prefix: str, depth: int) -> None:
+        indent = "  " * depth
+        for name in sorted((k for k in node if k.endswith("/")), key=str.casefold):
+            child = node[name]
+            while len(child) == 1 and next(iter(child)).endswith("/"):
+                (sub, child), = child.items()
+                name += sub
+            folder_id = f"dir:{changes[0].group}:{prefix}{name}".rstrip("/")
+            shut = folder_id in collapsed
+            entries.append((folder_id, f"{indent}{'▸' if shut else '▾'} {name}", None))
+            if not shut:
+                walk(child, prefix + name, depth + 1)
+        for name in sorted((k for k in node if not k.endswith("/")), key=str.casefold):
+            f = node[name]
+            entries.append((f"{f.group}:{f.path}", indent + file_label(f, name), f))
+
+    walk(root, "", 0)
+    return entries
+
+
+def one_line(s: str) -> Text:
+    """목록 한 줄: 칸보다 길면 다음 줄로 넘기지 않고 … 으로 자른다."""
+    return Text(s, no_wrap=True, overflow="ellipsis")
 
 
 def commit_message(c: gitio.Commit) -> str:
@@ -57,23 +98,19 @@ def commit_message(c: gitio.Commit) -> str:
     return f"{text}\n\n{body}" if body else text
 
 
-def working_entries(staged: list[gitio.FileChange], unstaged: list[gitio.FileChange]) -> list[Entry]:
+def working_entries(staged: list[gitio.FileChange], unstaged: list[gitio.FileChange], collapsed: set[str]) -> list[Entry]:
     entries: list[Entry] = []
     for title, changes in (("Stage된 변경", staged), ("Stage 안 된 변경", unstaged)):
         entries.append((None, f"{title} ({len(changes)})", None))
-        entries += commit_entries(changes)
+        entries += tree_entries(changes, collapsed)
     return entries
 
 
-def commit_entries(changes: list[gitio.FileChange]) -> list[Entry]:
-    return [(f"{f.group}:{f.path}", file_label(f), f) for f in changes]
-
-
 def pick(ids: list[str | None], want_id: str | None, want_index: int | None) -> int | None:
-    """want_id 가 있으면 그 자리, 없으면 want_index 이후 첫 파일(넘치면 마지막 파일)."""
+    """want_id 가 있으면 그 자리, 없으면 want_index 이후 첫 파일(넘치면 마지막 파일). 폴더는 건너뛴다."""
     if want_id is not None and want_id in ids:  # 묶음 제목의 id 도 None 이다
         return ids.index(want_id)
-    real = [i for i, k in enumerate(ids) if k]
+    real = [i for i, k in enumerate(ids) if k and not k.startswith("dir:")]
     if not real:
         return None
     return next((i for i in real if i >= (want_index or 0)), real[-1])
@@ -124,14 +161,51 @@ class ResultScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class Splitter(Widget):
+    """마우스로 끌어 옆 칸 크기를 바꾸는 경계선."""
+    DEFAULT_CSS = """
+    Splitter { background: $panel; }
+    Splitter:hover, Splitter.-dragging { background: $accent; }
+    Splitter.-vertical { width: 1; height: 1fr; }
+    Splitter.-horizontal { height: 1; width: 1fr; }
+    """
+
+    class Dragged(Message):
+        """끄는 중이면 done=False (안내선만 옮긴다), 놓으면 done=True (칸 크기를 바꾼다)."""
+
+        def __init__(self, splitter: "Splitter", x: int, y: int, done: bool) -> None:
+            super().__init__()
+            self.splitter, self.x, self.y, self.done = splitter, x, y, done
+
+    def __init__(self, vertical: bool, id: str) -> None:
+        super().__init__(id=id, classes="-vertical" if vertical else "-horizontal")
+
+    def render(self) -> str:
+        return ""  # 배경색만 보이는 선. 기본 render 는 위젯 이름을 그린다
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self.capture_mouse()
+        self.add_class("-dragging")
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self.has_class("-dragging"):
+            self.post_message(self.Dragged(self, event.screen_x, event.screen_y, done=False))
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self.has_class("-dragging"):
+            self.post_message(self.Dragged(self, event.screen_x, event.screen_y, done=True))
+        self.release_mouse()
+        self.remove_class("-dragging")
+
+
 class EasyGitApp(App):
     CSS = """
-    #left { width: 40%; }
-    #commits, #files { height: 1fr; }
+    #commits, #files { height: 1fr; text-wrap: nowrap; text-overflow: ellipsis; }
     #message { height: auto; max-height: 40%; padding: 0 1; }
     #diff { height: 1fr; }
-    Screen.-narrow #left { width: 100%; }
-    Screen.-narrow #right { display: none; }
+    Screen { layers: base guide; }
+    #ghost { layer: guide; display: none; background: $accent; }
+    Screen.-narrow #right, Screen.-narrow #split-v { display: none; }
     Screen.-narrow.-page-diff #left { display: none; }
     Screen.-narrow.-page-diff #right { display: block; }
     """
@@ -143,6 +217,8 @@ class EasyGitApp(App):
         Binding("c", "commit", "커밋"),
         Binding("r", "reload", "새로 고침"),
         Binding("escape", "back", "목록으로", show=False),
+        Binding("left", "fold(False)", "폴더 접기", show=False),
+        Binding("right", "fold(True)", "폴더 펴기", show=False),
         Binding("q", "quit", "닫기"),
     ]
 
@@ -158,16 +234,22 @@ class EasyGitApp(App):
         self._staged: list[gitio.FileChange] = []
         self._unstaged: list[gitio.FileChange] = []
         self._files: dict[str, gitio.FileChange] = {}
+        self._commit_changes: list[gitio.FileChange] = []  # 지금 고른 커밋의 파일 (폴더 접기·펴기 때 다시 그리려고)
+        self._collapsed: set[str] = set()  # 접힌 폴더 id. 새로 고침해도 유지한다
+        self._left_width: int | None = None  # 마우스로 끌어 정한 왼쪽 열 너비. 끄면 잊는다
         self._snap: str | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal():
             with Vertical(id="left"):
                 yield OptionList(id="commits", markup=False)
+                yield Splitter(vertical=False, id="split-h")
                 yield OptionList(id="files", markup=False)
+            yield Splitter(vertical=True, id="split-v")
             with Vertical(id="right"):
                 yield Static(id="message", markup=False)
                 yield DiffView(id="diff")
+        yield Static(id="ghost")  # 경계를 끄는 동안만 보이는 안내선 (배치 위에 따로 얹힌다)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -188,8 +270,33 @@ class EasyGitApp(App):
 
     def _apply_layout(self, width: int) -> None:
         self.layout_name = layout_for(width)
+        left = self.query_one("#left")
+        if self.layout_name == "narrow":
+            left.styles.width = "100%"
+        elif self._left_width:
+            left.styles.width = max(MIN_LEFT, min(self._left_width, width - MIN_RIGHT))
+        else:
+            left.styles.width = "40%"
         self._apply_page()
         self._sync_mode()
+
+    @on(Splitter.Dragged)
+    def _splitter_dragged(self, event: Splitter.Dragged) -> None:
+        ghost, r = self.query_one("#ghost"), event.splitter.region
+        vertical = event.splitter.id == "split-v"
+        if not event.done:  # 칸은 그대로 두고 안내선만 옮긴다 (칸 크기를 바꾸면 화면 전체를 다시 그린다)
+            ghost.styles.width, ghost.styles.height = (1, r.height) if vertical else (r.width, 1)
+            ghost.styles.offset = (event.x, r.y) if vertical else (r.x, event.y)
+            ghost.display = True
+            return
+        ghost.display = False
+        if vertical:
+            left = self.query_one("#left")
+            self._left_width = max(MIN_LEFT, min(event.x - left.region.x, self.size.width - MIN_RIGHT))
+            left.styles.width = self._left_width
+        else:
+            commits, left = self.query_one("#commits"), self.query_one("#left")
+            commits.styles.height = max(MIN_LIST, min(event.y - commits.region.y, left.region.height - MIN_LIST - 1))
 
     def _apply_page(self) -> None:
         screen = self.screen_stack[0]  # 모달이 떠 있어도 메인 화면에
@@ -222,12 +329,14 @@ class EasyGitApp(App):
             commits = gitio.commits(self.repo)
             staged, unstaged = gitio.working_changes(self.repo)
             chosen = next((c for c in commits if c.sha == commit_id), None)
+            collapsed = set(self._collapsed)
+            commit_changes = gitio.commit_changes(self.repo, chosen) if chosen else []
             if chosen:
-                message, entries = commit_message(chosen), commit_entries(gitio.commit_changes(self.repo, chosen))
+                message, entries = commit_message(chosen), tree_entries(commit_changes, collapsed)
             else:
-                message, entries = WORKING_MESSAGE, working_entries(staged, unstaged)
+                message, entries = WORKING_MESSAGE, working_entries(staged, unstaged, collapsed)
             index = pick([k for k, _, _ in entries], file_id, file_index)
-            change = entries[index][2] if index is not None else None
+            change = entries[index][2] if index is not None else None  # 폴더면 None
             rows = gitio.file_rows(self.repo, change) if change else []
         except GIT_ERRORS as e:
             self._git_failed(e, quiet)
@@ -235,18 +344,21 @@ class EasyGitApp(App):
         if not get_current_worker().is_cancelled:
             self.call_from_thread(
                 self._apply_reload, selection, quiet, commits, staged, unstaged,
-                chosen.sha if chosen else "WORKING", message, entries, index, rows,
+                chosen.sha if chosen else "WORKING", message, entries, index, rows, commit_changes,
             )
 
-    def _apply_reload(self, selection, quiet, commits, staged, unstaged, commit_id, message, entries, index, rows) -> None:
+    def _apply_reload(self, selection, quiet, commits, staged, unstaged, commit_id, message, entries, index, rows, commit_changes) -> None:
         if self._selection() != selection:
             # 읽는 동안 사용자가 다른 항목으로 옮겼다. 그 선택으로 다시 읽는다.
             self.reload(quiet)
             return
         same_file = commit_id == selection[0] and index is not None and entries[index][0] == selection[1]
+        self._commit_changes = commit_changes
         with self.prevent(OptionList.OptionHighlighted):  # 목록을 다시 채우며 본문이 처음으로 돌아가지 않게
             self._fill_commits(commits, staged, unstaged, commit_id)
             self._fill_files(message, entries, index)
+        if index is not None and entries[index][2] is None:
+            return  # 폴더에 있었다: 본문은 그대로 둔다
         self.query_one(DiffView).show(rows, self._shown_mode(), keep_scroll=same_file)
 
     def _poll(self) -> None:
@@ -270,8 +382,8 @@ class EasyGitApp(App):
         self._commits = {c.sha: c for c in commits}
         self._staged, self._unstaged = staged, unstaged
         now = int(time.time())
-        options = [Option(f"● 작업 중인 변경 ({len(staged) + len(unstaged)})", id="WORKING")]
-        options += [Option(f"{c.short}  {c.subject}  {rel_time(c.when, now)}", id=c.sha) for c in commits]
+        options = [Option(one_line(f"● 작업 중인 변경 ({len(staged) + len(unstaged)})"), id="WORKING")]
+        options += [Option(one_line(f"{c.short}  {c.subject}  {rel_time(c.when, now)}"), id=c.sha) for c in commits]
         lst = self.query_one("#commits", OptionList)
         lst.set_options(options)
         lst.highlighted = lst.get_option_index(commit_id)
@@ -280,7 +392,8 @@ class EasyGitApp(App):
     def _commit_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option.id == "WORKING":
             # git 호출이 없으니 worker 없이 바로 채운다
-            entries = working_entries(self._staged, self._unstaged)
+            self._commit_changes = []
+            entries = working_entries(self._staged, self._unstaged, self._collapsed)
             self._fill_files(WORKING_MESSAGE, entries, pick([k for k, _, _ in entries], None, None))
         else:
             self.load_commit_files(self._commits[event.option.id])
@@ -288,32 +401,51 @@ class EasyGitApp(App):
     @work(thread=True, exclusive=True, group="files")
     def load_commit_files(self, commit: gitio.Commit) -> None:
         try:
-            entries = commit_entries(gitio.commit_changes(self.repo, commit))
+            changes = gitio.commit_changes(self.repo, commit)
         except GIT_ERRORS as e:
             self._git_failed(e)
             return
         if not get_current_worker().is_cancelled:
-            self.call_from_thread(self._fill_files, commit_message(commit), entries, pick([k for k, _, _ in entries], None, None))
+            self.call_from_thread(self._show_commit_files, commit, changes)
+
+    def _show_commit_files(self, commit: gitio.Commit, changes: list[gitio.FileChange]) -> None:
+        self._commit_changes = changes
+        entries = tree_entries(changes, self._collapsed)
+        self._fill_files(commit_message(commit), entries, pick([k for k, _, _ in entries], None, None))
 
     # --- 파일 목록 ---
 
     def _fill_files(self, message: str, entries: list[Entry], index: int | None) -> None:
         self.message_text = message
         self.query_one("#message", Static).update(message)
-        self._files = {k: f for k, _, f in entries if k}
+        self._files = {k: f for k, _, f in entries if f}
         lst = self.query_one("#files", OptionList)
-        lst.set_options([Option(label, id=k, disabled=k is None) for k, label, _ in entries])
+        lst.set_options([Option(one_line(label), id=k, disabled=k is None) for k, label, _ in entries])
         if index is None:
             self.query_one(DiffView).show([], self._shown_mode())
         else:
             lst.highlighted = index
 
+    def _redraw_files(self, want_id: str) -> None:
+        """폴더를 접거나 편 뒤, git 을 다시 읽지 않고 파일 목록만 다시 그린다."""
+        commit = self.query_one("#commits", OptionList).highlighted_option
+        if commit is not None and commit.id != "WORKING":
+            entries = tree_entries(self._commit_changes, self._collapsed)
+        else:
+            entries = working_entries(self._staged, self._unstaged, self._collapsed)
+        with self.prevent(OptionList.OptionHighlighted):
+            self._fill_files(self.message_text, entries, pick([k for k, _, _ in entries], want_id, None))
+
     @on(OptionList.OptionHighlighted, "#files")
     def _file_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        self.load_rows(self._files[event.option.id])
+        if event.option.id in self._files:  # 폴더면 본문은 그대로 둔다
+            self.load_rows(self._files[event.option.id])
 
     @on(OptionList.OptionSelected, "#files")
-    def _file_selected(self) -> None:
+    def _file_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option.id not in self._files:  # 폴더: Enter·클릭으로 접고 편다
+            self._set_folded(event.option.id, event.option.id not in self._collapsed)
+            return
         if self.layout_name == "narrow":
             self.narrow_page = "diff"
             self._apply_page()
@@ -355,20 +487,48 @@ class EasyGitApp(App):
     def action_reload(self) -> None:
         self.reload()
 
+    def _set_folded(self, folder_id: str, folded: bool) -> None:
+        (self._collapsed.add if folded else self._collapsed.discard)(folder_id)
+        self._redraw_files(folder_id)
+
+    def action_fold(self, expand: bool) -> None:
+        files = self.query_one("#files", OptionList)
+        option = files.highlighted_option
+        if self.focused is not files or option is None or option.id is None:
+            return
+        if option.id not in self._files:  # 폴더
+            self._set_folded(option.id, not expand)
+            return
+        if not expand:  # 파일에서 ← : 그 파일이 든 폴더를 접고 그 폴더로 옮긴다
+            change = self._files[option.id]
+            parents = [k for k in self._folder_ids() if change.path.startswith(k.split(":", 2)[2] + "/") and k.startswith(f"dir:{change.group}:")]
+            if parents:
+                self._set_folded(max(parents, key=len), True)
+
+    def _folder_ids(self) -> list[str]:
+        files = self.query_one("#files", OptionList)
+        ids = (files.get_option_at_index(i).id for i in range(files.option_count))
+        return [k for k in ids if k and k not in self._files]
+
     def action_toggle_stage(self) -> None:
         option = self.query_one("#files", OptionList).highlighted_option
         if option is None or option.id is None:
             return
-        change = self._files[option.id]
-        if change.group == "commit":
+        if option.id in self._files:
+            changes = [self._files[option.id]]
+        else:  # 폴더: 접혀 있어도 그 안의 파일 전체
+            _, group, folder = option.id.split(":", 2)
+            changes = [f for f in self._staged + self._unstaged if f.group == group and f.path.startswith(folder + "/")]
+        if not changes or changes[0].group == "commit":
             self.notify("작업 중인 변경의 파일에서만 됩니다")
             return
-        self._toggle_stage(change)
+        self._toggle_stage(changes)
 
     @work(thread=True, group="git")
-    def _toggle_stage(self, change: gitio.FileChange) -> None:
+    def _toggle_stage(self, changes: list[gitio.FileChange]) -> None:
         try:
-            (gitio.stage if change.group == "unstaged" else gitio.unstage)(self.repo, change)
+            for change in changes:  # ponytail: 파일마다 git 한 번. 수백 개 폴더에서 느리면 경로를 묶어 한 번에
+                (gitio.stage if change.group == "unstaged" else gitio.unstage)(self.repo, change)
         except GIT_ERRORS as e:
             self._git_failed(e)
             return
