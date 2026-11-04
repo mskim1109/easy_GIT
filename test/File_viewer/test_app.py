@@ -352,3 +352,13 @@ def test_poll_survives_unreadable_file(repo, monkeypatch):
         await _for(app, pilot, 0.5)
         assert calls and app.is_running and tab.loaded.text == "a\n"
     run(repo, body, poll_interval=0.1)
+
+
+def test_poll_while_closing_is_harmless(repo):
+    # 앱이 닫히는 중(위젯이 지워진 뒤)에 타이머가 한 번 더 돌아도 앱이 오류로 끝나지 않는다.
+    async def body(app, pilot):
+        await app.query_one("#tree").remove()
+        app.poll_once()
+        await settle(app, pilot)
+        assert app.is_running
+    run(repo, body)

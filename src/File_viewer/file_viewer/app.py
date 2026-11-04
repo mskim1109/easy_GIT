@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.command import CommandPalette, Hit, Hits, Provider
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import ContentSwitcher, DirectoryTree, Footer, OptionList, Static, TabbedContent, Tabs
 from textual.widgets.option_list import Option
@@ -163,7 +164,10 @@ class FileViewerApp(App):
         """한 번 확인한다. 대상은 메인 스레드에서 모으고, 디스크·git 은 스레드에서 읽는다."""
         if self._poll_worker is not None and self._poll_worker.is_running:
             return  # 앞 확인이 아직 도는 중(느린 git). 겹쳐 돌리지 않는다
-        tree = self.query_one("#tree", FileTree)
+        try:
+            tree = self.query_one("#tree", FileTree)
+        except NoMatches:  # 앱이 닫히는 중: 위젯이 먼저 지워지고 타이머가 한 번 더 돈다
+            return
         tabs = [(t, t.path, t.key, t.deleted) for t in self.query(FileTab) if not t.editing]
         dirs, todo = [], [tree.root]
         while todo:
