@@ -4,7 +4,7 @@ from pathlib import Path
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.containers import VerticalScroll
-from textual.widgets import Markdown, Static, TabPane
+from textual.widgets import Markdown, Static, TabPane, TextArea
 
 import file_viewer.files as files
 
@@ -15,6 +15,7 @@ class FileTab(TabPane):
     FileTab #body { height: 1fr; overflow-x: auto; }
     FileTab #code { width: auto; }
     FileTab #notice { padding: 1 2; }
+    FileTab #editor { display: none; height: 1fr; }
     """
 
     def __init__(self, path: Path, pane_id: str):
@@ -27,6 +28,7 @@ class FileTab(TabPane):
         self.md_rendered = path.suffix.lower() in (".md", ".markdown")
         self.deleted = False
         self.editing = False
+        self.edit_key: tuple[int, int] | None = None
         self.highlighted = False
         self.notice: str | None = None
         self.shown_text = ""
@@ -37,6 +39,40 @@ class FileTab(TabPane):
             yield Static(id="code")
             yield Markdown(id="md")
             yield Static(id="notice")
+        yield TextArea(id="editor", show_line_numbers=True, soft_wrap=False, tab_behavior="indent")
+
+    def start_edit(self) -> bool:
+        """편집 상태로. 편집할 수 없는 파일이면 False."""
+        if self.loaded is None or not self.loaded.editable or self.loaded.binary or self.deleted:
+            return False
+        editor = self.query_one("#editor", TextArea)
+        editor.load_text(self.loaded.text)  # md 도 원문으로 편집한다
+        # 기준은 편집 칸에 넣은 내용을 읽었을 때의 상태다. 그 뒤 디스크가 바뀌었으면 저장 때 묻는다.
+        self.editing, self.edit_key = True, self.key
+        self.query_one("#body").display = False
+        editor.display = True
+        editor.focus()
+        return True
+
+    def is_dirty(self) -> bool:
+        return self.editing and self.query_one("#editor", TextArea).text != self.loaded.text
+
+    def write_file(self) -> None:
+        files.save(self.path, self.query_one("#editor", TextArea).text, self.loaded)
+        self.loaded = files.load(self.path)
+        self.key = self.edit_key = files.stat_key(self.path)
+
+    def stop_edit(self) -> None:
+        """보기 상태로 돌아가 디스크 내용을 다시 읽는다."""
+        self.editing = False
+        self.query_one("#editor").display = False
+        body = self.query_one("#body")
+        body.display = True
+        body.focus()
+        try:
+            self.refresh_content()
+        except OSError as e:
+            self.show_notice(f"읽을 수 없습니다: {e}")
 
     def on_mount(self) -> None:
         try:

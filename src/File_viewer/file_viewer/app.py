@@ -109,6 +109,31 @@ class MenuScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    """y / Enter → True, n / Esc → False."""
+
+    DEFAULT_CSS = """
+    ConfirmScreen { align: center middle; }
+    ConfirmScreen > Static { width: auto; max-width: 70; border: round $warning; padding: 1 2; background: $surface; }
+    """
+    BINDINGS = [Binding("y", "answer(True)"), Binding("enter", "answer(True)"),
+                Binding("n", "answer(False)"), Binding("escape", "answer(False)")]
+
+    def __init__(self, question: str):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.question + "  (y 예 / n 아니요)")
+
+    def action_answer(self, yes: bool) -> None:
+        self.dismiss(yes)
+
+
+# priority 바인딩은 메뉴·확인·찾기 창이 떠 있어도 앱까지 온다. 그때는 끈다(일반 키는 Textual 이 막는다).
+PRIORITY_ACTIONS = {"next_tab", "previous_tab", "stop_edit"}
+
+
 class FileViewerApp(App):
     CSS = """
     #tabs { width: 1fr; height: 1fr; }
@@ -127,8 +152,23 @@ class FileViewerApp(App):
         Binding("v", "toggle_md", "md 보기"),
         Binding("o", "open_external", "열기"),
         Binding("m", "menu", "메뉴"),
+        Binding("e", "edit", "편집"),
+        Binding("ctrl+s", "save", "저장"),
+        # TextArea(tab_behavior=indent)가 Esc 를 먼저 먹으므로 priority. 편집 중에만 켜진다(check_action).
+        Binding("escape", "stop_edit", "편집 끝", priority=True),
         Binding("q", "quit", "종료"),
     ]
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in PRIORITY_ACTIONS and isinstance(self.screen, ModalScreen):
+            return False
+        tab = self.current_tab
+        editing = tab is not None and tab.editing
+        if action in ("next_tab", "previous_tab", "edit"):
+            return not editing  # 편집 중 Tab 은 TextArea 의 들여쓰기로 간다
+        if action in ("save", "stop_edit"):
+            return editing
+        return True
 
     def __init__(self, root: Path, poll_interval: float = 1.0):
         super().__init__()
@@ -255,7 +295,10 @@ class FileViewerApp(App):
 
     @property
     def current_tab(self) -> FileTab | None:
-        pane = self.query_one("#tabs", TabbedContent).active_pane
+        try:
+            pane = self.query_one("#tabs", TabbedContent).active_pane
+        except NoMatches:  # 뜨기 전·닫히는 중(check_action 이 이때도 불린다)
+            return None
         return pane if isinstance(pane, FileTab) else None
 
     def open_file(self, path: Path) -> None:
@@ -306,9 +349,59 @@ class FileViewerApp(App):
         tab = self.current_tab
         if tab is None:
             return
-        del self.tab_ids[tab.path]
+        self._unless_dirty(tab.is_dirty(), lambda: self._close(tab))
+
+    def _close(self, tab: FileTab) -> None:
+        if self.tab_ids.pop(tab.path, None) is None:
+            return
         self.query_one("#tabs", TabbedContent).remove_pane(tab.id)
         self._update_empty()
+
+    def _unless_dirty(self, dirty: bool, then) -> None:
+        """저장하지 않은 변경이 있으면 버릴지 묻고, 예일 때만 then()."""
+        if not dirty:
+            then()
+            return
+        self.push_screen(ConfirmScreen("저장하지 않은 변경을 버릴까요?"), lambda yes: yes and then())
+
+    def action_edit(self) -> None:
+        tab = self.current_tab
+        if tab is None:
+            return
+        if not tab.start_edit():
+            self.notify("이 파일은 편집할 수 없습니다", severity="warning")
+        self.refresh_bindings()
+
+    def action_save(self) -> None:
+        tab = self.current_tab
+        if tab is None or not tab.editing:
+            return
+        if files.stat_key(tab.path) != tab.edit_key:
+            self.push_screen(ConfirmScreen("다른 곳에서 파일이 바뀌었습니다. 덮어쓸까요?"),
+                             lambda yes: yes and self._write(tab))
+        else:
+            self._write(tab)
+
+    def _write(self, tab: FileTab) -> None:
+        try:
+            tab.write_file()
+        except (OSError, UnicodeEncodeError) as e:  # 인코딩은 쓰기 전에 실패하므로 파일은 그대로
+            self.notify(f"저장 실패: {e}", severity="error")
+            return
+        self.notify("저장했습니다")
+
+    def action_stop_edit(self) -> None:
+        tab = self.current_tab
+        if tab is None or not tab.editing:
+            return
+
+        def stop() -> None:
+            tab.stop_edit()
+            self.refresh_bindings()
+        self._unless_dirty(tab.is_dirty(), stop)
+
+    async def action_quit(self) -> None:
+        self._unless_dirty(any(t.is_dirty() for t in self.query(FileTab)), self.exit)
 
     def action_toggle_md(self) -> None:
         if self.current_tab:

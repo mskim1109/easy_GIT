@@ -8,9 +8,9 @@ import file_viewer.files as files
 import file_viewer.gitstate as gitstate
 import file_viewer.shellops as shellops
 from textual.command import CommandList, CommandPalette
-from textual.widgets import OptionList
+from textual.widgets import OptionList, TextArea
 
-from file_viewer.app import FileTree, FileViewerApp, MenuScreen
+from file_viewer.app import ConfirmScreen, FileTree, FileViewerApp, MenuScreen
 
 from conftest import git, settle, wait_until, write
 
@@ -361,4 +361,158 @@ def test_poll_while_closing_is_harmless(repo):
         app.poll_once()
         await settle(app, pilot)
         assert app.is_running
+    run(repo, body)
+
+
+def _editor(app):
+    return app.current_tab.query_one("#editor", TextArea)
+
+
+async def _edit(app, pilot, path):
+    await _open(app, pilot, path)
+    await pilot.press("e"); await settle(app, pilot)
+    return _editor(app)
+
+
+def test_edit_save_keeps_cp949_and_crlf(repo):
+    write(repo, "a.txt", "가\r\n나\r\n".encode("cp949"))
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        assert app.current_tab.editing and ed.has_focus
+        ed.text = "가\n다\n"
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert (repo / "a.txt").read_bytes() == "가\r\n다\r\n".encode("cp949")
+    run(repo, body)
+
+
+def test_save_asks_before_overwriting_external_change(repo):
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        ed.text = "MINE\n"
+        write(repo, "a.txt", "AGENT\n")
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("n"); await settle(app, pilot)
+        assert (repo / "a.txt").read_bytes() == b"AGENT\n"
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("y"); await settle(app, pilot)
+        assert (repo / "a.txt").read_bytes() == b"MINE\n"
+    run(repo, body)
+
+
+def test_edit_of_stale_view_still_asks_before_overwrite(repo):
+    # 보던 내용이 낡았을 때(폴링 전에 에이전트가 고침) e → 저장하면, 편집 칸 내용 이후에 바뀐 것이므로 묻는다.
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        write(repo, "a.txt", "AGENT\n")
+        await pilot.press("e"); await settle(app, pilot)
+        ed = _editor(app)
+        assert ed.text == "a\n"
+        ed.text = "MINE\n"
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        assert (repo / "a.txt").read_bytes() == b"AGENT\n"
+    run(repo, body, poll_interval=60)
+
+
+def test_escape_with_unsaved_changes_asks(repo):
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        ed.text = "changed\n"
+        await pilot.press("escape"); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("y"); await settle(app, pilot)
+        assert not app.current_tab.editing
+        assert (repo / "a.txt").read_bytes() == b"a\n"
+    run(repo, body)
+
+
+def test_close_tab_and_quit_with_unsaved_changes_ask(repo):
+    # 편집 중에는 w·q 가 글자로 들어가므로 액션을 직접 부른다
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        ed.text = "x\n"
+        app.action_close_tab(); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("n"); await settle(app, pilot)
+        assert len(app.tab_ids) == 1
+        await app.action_quit(); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("n"); await settle(app, pilot)
+        assert app.is_running
+    run(repo, body)
+
+
+def test_editing_keys_go_to_editor(repo):
+    write(repo, "a.txt", "a\n"); write(repo, "b.txt", "b\n")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        ed = await _edit(app, pilot, repo / "b.txt")
+        await pilot.press("tab"); await settle(app, pilot)
+        assert app.current_tab.path == repo / "b.txt"
+        assert ed.text != "b\n" and ed.text.strip() == "b"
+        await pilot.press("q"); await settle(app, pilot)
+        assert app.is_running and "q" in ed.text
+    run(repo, body)
+
+
+def test_editing_tab_not_auto_refreshed(repo):
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        ed.text = "MINE\n"
+        write(repo, "a.txt", "AGENT\n")
+        await _for(app, pilot, 0.5)
+        assert ed.text == "MINE\n"
+    run(repo, body, poll_interval=0.1)
+
+
+def test_not_editable_file_refuses(repo):
+    write(repo, "x.txt", b"ok \xff\xfe\xfa\n"); write(repo, "logo.png", b"\x89PNG\x00\x00")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "x.txt")
+        await pilot.press("e"); await settle(app, pilot)
+        assert not app.current_tab.editing
+        await _open(app, pilot, repo / "logo.png")
+        await pilot.press("e"); await settle(app, pilot)
+        assert not app.current_tab.editing
+    run(repo, body)
+
+
+def test_save_unencodable_char_keeps_file(repo):
+    # CP949 로 쓸 수 없는 글자를 넣고 저장해도 앱이 살아 있고 파일은 그대로다.
+    write(repo, "a.txt", "가\r\n".encode("cp949"))
+    async def body(app, pilot):
+        ed = await _edit(app, pilot, repo / "a.txt")
+        ed.text = "😀\n"
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert app.is_running and (repo / "a.txt").read_bytes() == "가\r\n".encode("cp949")
+    run(repo, body)
+
+
+def test_priority_keys_under_modal_do_not_touch_main_screen(repo):
+    # Tab·Esc 는 priority 바인딩이라 창이 떠 있어도 앱까지 온다. 뒤의 탭을 바꾸거나 편집을 끝내면 안 된다.
+    write(repo, "a.txt", "a\n"); write(repo, "b.txt", "b\n")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        await _open(app, pilot, repo / "b.txt")
+        app.current_tab.query_one("#body").focus()
+        await pilot.press("m"); await settle(app, pilot)
+        assert isinstance(app.screen, MenuScreen)
+        await pilot.press("tab"); await settle(app, pilot)
+        assert app.current_tab.path == repo / "b.txt"
+        await pilot.press("escape"); await settle(app, pilot)
+        ed = await _edit(app, pilot, repo / "b.txt")
+        ed.text = "MINE\n"
+        write(repo, "b.txt", "AGENT\n")
+        await pilot.press("ctrl+s"); await settle(app, pilot)
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("escape"); await settle(app, pilot)  # 확인 창의 "아니요"
+        assert not isinstance(app.screen, ConfirmScreen) and app.current_tab.editing
+        assert (repo / "b.txt").read_bytes() == b"AGENT\n"
     run(repo, body)
