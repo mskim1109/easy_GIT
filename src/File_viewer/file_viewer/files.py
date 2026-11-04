@@ -10,7 +10,8 @@ import file_viewer.gitstate as gitstate
 
 Kind = Literal["code", "md", "html", "binary"]
 
-BIG_FILE = 2_000_000  # 바이트. 넘으면 강조 없이 보여준다.
+BIG_FILE = 100_000  # 바이트. 넘으면 강조 없이 보여준다(강조한 200KB .py 가 열기·새로 고침마다 1.5초).
+TOO_BIG = 20_000_000  # 바이트. 넘으면 읽지 않고 "o 로 열기" 안내만.
 BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".pdf",
               ".zip", ".7z", ".exe", ".dll", ".pyd", ".so"}
 _IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
@@ -26,8 +27,11 @@ class Loaded:
 
 
 def load(path: Path) -> Loaded:
+    # 확장자·크기는 읽기 전에 본다(1GB zip 을 메모리에 다 읽지 않게).
+    if path.suffix.lower() in BINARY_EXT or path.stat().st_size > TOO_BIG:
+        return Loaded("", "utf-8", "\n", False, True)
     data = path.read_bytes()
-    if path.suffix.lower() in BINARY_EXT or b"\x00" in data[:8192]:
+    if b"\x00" in data[:8192]:
         return Loaded("", "utf-8", "\n", False, True)
     tries = (["utf-8-sig"] if data.startswith(codecs.BOM_UTF8) else []) + ["utf-8", "cp949"]
     for enc in tries:

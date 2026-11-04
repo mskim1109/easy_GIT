@@ -1,7 +1,10 @@
 import asyncio
+import subprocess
+import sys
 import os
 import time
 
+import pytest
 from rich.style import Style
 
 import file_viewer.files as files
@@ -526,3 +529,86 @@ def test_empty_hint_matches_layout(repo):
         await pilot.resize_terminal(120, 40); await settle(app, pilot)
         assert "왼쪽 트리" in str(hint.content)
     run(repo, body, size=(52, 30))
+
+
+def test_medium_and_big_files_do_not_freeze(repo):
+    # 리뷰 실측: 200KB .py 8초, 55KB md 7초, 5MB 로그 6~13초 멈춤. 열기와 다시 그리기 모두 1.5초 안이어야 한다.
+    py = "def f(x):\n    return x * 2  # 주석 가나다\n\n"
+    write(repo, "mid.py", py * (90_000 // len(py.encode())))  # 강조 기준(100KB) 바로 아래
+    # 설계·계획 문서와 비슷한 55KB md: 문단·목록·코드 블록, 표는 가끔
+    md = "".join(f"## 절 {i}\n\n" + "설명 문장입니다. " * 20 + "\n\n- 항목 가\n- 항목 나\n\n```python\nx = {i}\n```\n\n"
+                 + ("| a | b |\n|---|---|\n| 1 | 2 |\n\n" if i % 10 == 0 else "") for i in range(90))
+    write(repo, "doc.md", md)
+    line = "2026-11-04 12:00:00.000 INFO  [worker-3] 요청 처리 id=0123456789 status=ok\n"
+    write(repo, "big.log", line * (5_000_000 // len(line.encode())))
+    async def body(app, pilot):
+        for name in ["mid.py", "doc.md", "big.log"]:
+            t = time.perf_counter()
+            tab = await _open(app, pilot, repo / name)
+            await pilot.pause(); await pilot.pause()
+            assert (took := time.perf_counter() - t) < 1.5, f"{name} 열기 {took:.1f}s"
+            t = time.perf_counter()
+            tab.refresh_content(True)  # 에이전트가 고칠 때마다 타는 경로
+            await pilot.pause(); await pilot.pause()
+            assert (took := time.perf_counter() - t) < 1.5, f"{name} 다시 그리기 {took:.1f}s"
+        assert app.query_one("#tabs").get_pane(app.tab_ids[repo / "mid.py"]).highlighted
+    run(repo, body, poll_interval=3600)
+
+
+def test_edit_refuses_text_the_editor_would_change(repo):
+    # TextArea 는 \x0c·U+2028 등도 줄바꿈으로 나눠 저장 때 내용이 바뀐다. 그런 파일은 편집을 거절한다.
+    original = b'a = 1\n\x0c\nb = "\xe2\x80\xa8"\n'
+    write(repo, "a.py", original)
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.py")
+        await pilot.press("e"); await settle(app, pilot)
+        assert not app.current_tab.editing
+        assert (repo / "a.py").read_bytes() == original
+    run(repo, body)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 정션")
+def test_junction_to_outside_root_does_not_crash(repo, tmp_path):
+    write(tmp_path, "outside/x.txt", "x\n")
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(repo / "link"), str(tmp_path / "outside")],
+                   check=True, capture_output=True)
+    async def body(app, pilot):
+        tree = app.query_one("#tree", FileTree)
+        await wait_until(lambda: any(n.data.path.name == "link" for n in tree.root.children), app, pilot)
+        node = _node(tree, "link")
+        node.expand()
+        await wait_until(lambda: len(node.children) > 0, app, pilot)
+        tree.render_label(node.children[0], Style(), Style())
+        await _open(app, pilot, node.children[0].data.path)
+        (tmp_path / "outside" / "x.txt").unlink()
+        await wait_until(lambda: app.current_tab.deleted, app, pilot)
+        assert app.is_running
+    run(repo, body, poll_interval=0.1)
+
+
+def test_narrow_open_focuses_content_for_keyboard_scroll(repo):
+    write(repo, "long.txt", "".join(f"line {i}\n" for i in range(200)))
+    async def body(app, pilot):
+        tab = await _open(app, pilot, repo / "long.txt")
+        scroll = tab.query_one("#body")
+        await pilot.press("pagedown"); await settle(app, pilot)
+        assert scroll.scroll_y > 0
+        scroll.scroll_home(animate=False)
+        await pilot.press("t"); await pilot.press("t"); await settle(app, pilot)  # 트리 화면 → 내용 화면
+        await pilot.press("pagedown"); await settle(app, pilot)
+        assert scroll.scroll_y > 0
+    run(repo, body, size=(60, 30))
+
+
+def test_poll_survives_unexpected_stat_error(repo, monkeypatch):
+    _commit_a(repo)
+    calls = []
+    def denied(path):
+        calls.append(path)
+        raise PermissionError("거부")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        monkeypatch.setattr(files, "stat_key", denied)
+        await _for(app, pilot, 0.5)
+        assert calls and app.is_running
+    run(repo, body, poll_interval=0.1)

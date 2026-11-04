@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import file_viewer.files as files
 from file_viewer.files import Loaded, find_candidates, kind_of, load, md_for_view, save, stat_key
 
 from conftest import write
@@ -55,3 +58,13 @@ def test_find_skips_ignored_dirs(repo):
 def test_find_candidates_without_git(tmp_path):
     write(tmp_path, "plain/a.txt", "x"); write(tmp_path, "plain/.git/HEAD", "x")
     assert find_candidates(tmp_path / "plain") == ["a.txt"]
+
+
+def test_huge_and_binary_ext_files_are_not_read(tmp_path, monkeypatch):
+    big = write(tmp_path, "a.log", "x" * 100)
+    z = write(tmp_path, "b.zip", b"PK\x03\x04")
+    monkeypatch.setattr(files, "TOO_BIG", 10)
+    def no_read(self):
+        raise AssertionError(f"읽으면 안 됨: {self}")
+    monkeypatch.setattr(Path, "read_bytes", no_read)
+    assert load(big).binary is True and load(z).binary is True

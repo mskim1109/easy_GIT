@@ -28,20 +28,30 @@ TREE_STEP = 4
 CONTENT_MIN = 30
 
 
+def rel_to(path: Path, root: Path) -> str | None:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
 class FileTree(DirectoryTree):
     def __init__(self, root: Path, id: str = "tree"):
         super().__init__(root, id=id)
         self.root_path = Path(root)
         self.state: gitstate.GitState | None = None
 
-    def rel(self, node) -> str:
-        return "" if node is self.root else node.data.path.relative_to(self.root_path).as_posix()
+    def rel(self, node) -> str | None:
+        """시작 폴더 기준 상대 경로. 루트 밖(정션·링크를 DirectoryTree 가 resolve 한 경로)이면 None."""
+        return "" if node is self.root else rel_to(node.data.path, self.root_path)
 
     def render_label(self, node, base_style, style):
         label = super().render_label(node, base_style, style)
         if node.data is None:
             return label
         rel = self.rel(node)
+        if rel is None:  # 루트 밖: git 표시를 하지 않는다
+            return label
         if gitstate.dimmed(self.state, rel):
             label.stylize("dim")
         m = gitstate.mark(self.state, rel, node.allow_expand)
@@ -218,11 +228,14 @@ class FileViewerApp(App):
                 todo.extend(node.children)
         self._poll_worker = self._poll(tree, tabs, dirs)
 
-    @work(thread=True, group="poll")
+    @work(thread=True, group="poll", exit_on_error=False)  # 예상 못 한 예외로 앱을 끝내지 않는다
     def _poll(self, tree: FileTree, tabs: list, dirs: list[Path]) -> None:
         # 화면을 옮기지 않는다: 여기서는 open_file·커서 이동·탭 전환을 하지 않는다(설계 §6).
         for tab, path, key, deleted in tabs:
-            now = files.stat_key(path)
+            try:
+                now = files.stat_key(path)
+            except OSError:  # 권한 등. 이 탭은 이번 주기를 건너뛴다
+                continue
             if now is None:
                 if not deleted:
                     self.call_from_thread(self._mark_deleted, tab)
@@ -256,7 +269,7 @@ class FileViewerApp(App):
         if not tab.is_attached:
             return
         tab.deleted = True
-        tab.show_notice(f"지워진 파일입니다: {tab.path.relative_to(self.root).as_posix()}")
+        tab.show_notice(f"지워진 파일입니다: {rel_to(tab.path, self.root) or tab.path}")
 
     def on_resize(self, event: events.Resize) -> None:
         self.apply_layout(event.size.width)  # 이 시점의 self.size 는 아직 옛 값이다
@@ -281,6 +294,8 @@ class FileViewerApp(App):
         self.apply_layout()
         if shown:
             self.query_one("#tree").focus()
+        elif self.narrow:
+            self._focus_content()
 
     def action_tree_width(self, step: int) -> None:
         if self.narrow:
@@ -288,7 +303,7 @@ class FileViewerApp(App):
         self.tree_width = max(TREE_MIN, min(self.size.width - CONTENT_MIN, self.tree_width + step))
         self.apply_layout()
 
-    @work(thread=True, exclusive=True, group="git")
+    @work(thread=True, exclusive=True, group="git", exit_on_error=False)
     def _load_state(self, tree: FileTree) -> None:
         try:
             state = gitstate.read_state(self.root)
@@ -325,6 +340,13 @@ class FileViewerApp(App):
             await tabs.add_pane(FileTab(path, pane_id))
         tabs.active = pane_id
         self._update_empty()
+        if self.narrow:  # 좁으면 트리가 숨어 포커스가 사라지므로 내용에 준다(PgDn 등으로 스크롤)
+            self._focus_content()
+
+    def _focus_content(self) -> None:
+        tab = self.current_tab
+        if tab is not None and not tab.editing:
+            tab.query_one("#body").focus()
 
     def _update_empty(self) -> None:
         self._hint.display = not self.tab_ids
