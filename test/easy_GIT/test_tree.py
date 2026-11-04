@@ -302,3 +302,17 @@ def test_key_menu_labels_are_english():
     from easy_git.app import CommitScreen, ResultScreen
     labels = [b.description for cls in (EasyGitApp, CommitScreen, ResultScreen) for b in cls.BINDINGS]
     assert labels and all(label.isascii() for label in labels), labels
+
+
+def test_screen_text_has_no_korean(repo):
+    # 화면 글은 영어로: 묶음 제목, 작업 중인 변경, 빈 본문 안내 등
+    import re
+    _repo_with_folder(repo)
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            assert not re.search("[\uac00-\ud7a3]", app.export_screenshot())
+
+    asyncio.run(run())

@@ -108,7 +108,7 @@ class DiffView(ScrollView):
 
     def _build(self) -> None:
         if not self.rows:
-            self._cells = [_cell("", [("바이너리 파일" if self.rows is None else "내용 변경 없음", DEFAULT)], "")]
+            self._cells = [_cell("", [("Binary file" if self.rows is None else "No content changes", DEFAULT)], "")]
             return self._finish(0)
         if self._colors is None:
             self._colors = colored(self.source, self.path)

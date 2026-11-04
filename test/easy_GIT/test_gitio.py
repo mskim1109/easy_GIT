@@ -108,9 +108,9 @@ def test_commit_success_with_korean_message(repo):
 
 def test_commit_refuses_empty_message_or_nothing_staged(repo):
     write(repo, "a.txt", "1\n"); git(repo, "add", ".")
-    assert commit(repo, "   ") == (False, "커밋 메시지가 비어 있습니다.")
+    assert commit(repo, "   ") == (False, "Commit message is empty.")
     git(repo, "commit", "-m", "c1")
-    assert commit(repo, "x") == (False, "Stage된 파일이 없습니다.")
+    assert commit(repo, "x") == (False, "Nothing staged.")
 
 def test_commit_runs_pre_commit_hook_and_shows_output(repo):
     hook = repo / ".git" / "hooks" / "pre-commit"

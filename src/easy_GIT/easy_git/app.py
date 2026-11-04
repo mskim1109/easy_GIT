@@ -22,7 +22,7 @@ from easy_git.diffview import DiffView, colored
 NARROW_BELOW = 90
 SIDE_FROM = 160
 MIN_LEFT, MIN_RIGHT, MIN_LIST = 20, 30, 3  # 마우스로 끌 때 칸이 사라지지 않게 하는 최소 크기
-WORKING_MESSAGE = "작업 중인 변경 (커밋 전)"
+WORKING_MESSAGE = "Working changes (not committed)"
 GIT_ERRORS = (gitio.GitError, OSError)
 
 # 파일 목록 한 줄: (옵션 id 또는 묶음 제목이면 None, 화면 문구, 파일 — 폴더·제목이면 None)
@@ -33,13 +33,13 @@ Entry = tuple[str | None, str, gitio.FileChange | None]
 def rel_time(epoch: int, now: int) -> str:
     d = now - epoch
     if d < 60:
-        return "방금"
+        return "just now"
     if d < 3600:
-        return f"{d // 60}분 전"
+        return f"{d // 60}m ago"
     if d < 86400:
-        return f"{d // 3600}시간 전"
+        return f"{d // 3600}h ago"
     if d < 30 * 86400:
-        return f"{d // 86400}일 전"
+        return f"{d // 86400}d ago"
     return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
 
 
@@ -51,7 +51,7 @@ def layout_for(width: int) -> str:
 
 def file_label(f: gitio.FileChange, name: str) -> str:
     renamed = f" ← {f.old_path}" if f.old_path else ""
-    nums = "바이너리" if f.binary else f"+{f.added} -{f.deleted}"
+    nums = "binary" if f.binary else f"+{f.added} -{f.deleted}"
     return f"{f.status} {name}{renamed}  {nums}"
 
 
@@ -112,7 +112,7 @@ def commit_message(c: gitio.Commit) -> str:
 
 def working_entries(staged: list[gitio.FileChange], unstaged: list[gitio.FileChange], collapsed: set[str]) -> list[Entry]:
     entries: list[Entry] = []
-    for title, changes in (("Stage된 변경", staged), ("Stage 안 된 변경", unstaged)):
+    for title, changes in (("Staged changes", staged), ("Unstaged changes", unstaged)):
         entries.append((None, f"{title} ({len(changes)})", None))
         entries += tree_entries(changes, collapsed)
     return entries
@@ -141,7 +141,7 @@ class CommitScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("커밋 메시지 (Enter 커밋 · Esc 취소)")
+            yield Label("Commit message (Enter: commit · Esc: cancel)")
             yield Input()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -165,7 +165,7 @@ class ResultScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("커밋하지 못했습니다 (Enter / Esc 닫기)")
+            yield Label("Commit failed (Enter / Esc: close)")
             with VerticalScroll():
                 yield Static(self.text, markup=False)
 
@@ -273,7 +273,7 @@ class EasyGitApp(App):
     def _git_failed(self, e: Exception, quiet: bool = False) -> None:
         """worker 안에서 난 git 오류. 폴링이면 조용히 넘기고, 사용자 동작이면 git 메시지를 보여준다."""
         if not quiet:
-            self.call_from_thread(self.notify, error_text(e), title="git 오류", severity="error")
+            self.call_from_thread(self.notify, error_text(e), title="git error", severity="error")
 
     # --- 배치 ---
 
@@ -396,7 +396,7 @@ class EasyGitApp(App):
         self._commits = {c.sha: c for c in commits}
         self._staged, self._unstaged = staged, unstaged
         now = int(time.time())
-        options = [Option(one_line(f"● 작업 중인 변경 ({len(staged) + len(unstaged)})"), id="WORKING")]
+        options = [Option(one_line(f"● Working changes ({len(staged) + len(unstaged)})"), id="WORKING")]
         options += [Option(one_line(f"{c.short}  {c.subject}  {rel_time(c.when, now)}"), id=c.sha) for c in commits]
         lst = self.query_one("#commits", OptionList)
         lst.set_options(options)
@@ -535,7 +535,7 @@ class EasyGitApp(App):
             _, group, folder = option.id.split(":", 2)
             changes = [f for f in self._staged + self._unstaged if f.group == group and f.path.startswith(folder + "/")]
         if not changes or changes[0].group == "commit":
-            self.notify("작업 중인 변경의 파일에서만 됩니다")
+            self.notify("Only working changes can be staged")
             return
         self._toggle_stage(changes)
 
@@ -551,7 +551,7 @@ class EasyGitApp(App):
 
     def action_commit(self) -> None:
         if not self._staged:
-            self.notify("Stage된 파일이 없습니다.")
+            self.notify("Nothing staged.")
             return
         self.push_screen(CommitScreen(), self._commit_entered)
 
@@ -568,7 +568,7 @@ class EasyGitApp(App):
             self._git_failed(e)
             return
         if ok:
-            self.call_from_thread(self.notify, f"커밋했습니다: {short}")
+            self.call_from_thread(self.notify, f"Committed {short}")
             self.call_from_thread(self.reload)
         else:
             self.call_from_thread(self.push_screen, ResultScreen(out))

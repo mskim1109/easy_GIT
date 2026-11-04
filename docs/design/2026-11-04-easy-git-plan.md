@@ -16,7 +16,7 @@
 - 코드는 `src/easy_GIT/easy_git/`, 테스트는 `test/easy_GIT/`, 문서는 `docs/design/`에 둔다.
 - git은 git CLI(subprocess)로만 다룬다. GitPython 같은 라이브러리는 쓰지 않는다.
 - 저장소를 바꾸는 동작은 stage, unstage, commit 셋뿐이다. 사용자가 키를 눌렀을 때만 실행한다. `--no-verify`, discard, amend, push는 쓰지 않는다.
-- 화면 문구는 한국어다. 한글 경로, 커밋 메시지, 파일 내용(UTF-8 / CP949)이 깨지지 않아야 한다.
+- 화면 문구는 영어다 (2026-11-04 사용자 결정으로 한국어에서 바꿈). 한글 경로, 커밋 메시지, 파일 내용(UTF-8 / CP949)은 깨지지 않아야 한다.
 - Windows 11 기본 콘솔 창(conhost) 안의 Herdr 0.9.5에서 돌아가야 한다. Ctrl+V 붙여넣기에 의존하지 않는다.
 - 테스트는 저장소 최상위에서 `uv run --project src/easy_GIT pytest test/easy_GIT -q`로 돌린다.
 - 이 저장소의 git 커밋 메시지는 맨 끝에 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` 줄을 붙인다.

@@ -39,8 +39,8 @@ def test_wide_opens_working_changes_with_full_file(repo):
             commits_list = app.query_one("#commits", OptionList)
             files = app.query_one("#files", OptionList)
             diff = app.query_one(DiffView)
-            assert str(commits_list.get_option_at_index(0).prompt).startswith("● 작업 중인 변경 (1)")
-            assert any(p.startswith("Stage 안 된 변경 (1)") for p in _prompts(files))
+            assert str(commits_list.get_option_at_index(0).prompt).startswith("● Working changes (1)")
+            assert any(p.startswith("Unstaged changes (1)") for p in _prompts(files))
             assert files.highlighted_option.id == "unstaged:config.py"
             assert diff.mode == "unified" and len(diff.rows) == 11 and diff.cursor_row == 4
 
@@ -97,7 +97,7 @@ def test_n_and_p_move_between_changes(repo):
 
 
 def test_rel_time():
-    assert [rel_time(1000, 1030), rel_time(0, 120), rel_time(0, 7200), rel_time(0, 3 * 86400)] == ["방금", "2분 전", "2시간 전", "3일 전"]
+    assert [rel_time(1000, 1030), rel_time(0, 120), rel_time(0, 7200), rel_time(0, 3 * 86400)] == ["just now", "2m ago", "2h ago", "3d ago"]
     assert rel_time(0, 40 * 86400) == "1970-01-01"
 
 

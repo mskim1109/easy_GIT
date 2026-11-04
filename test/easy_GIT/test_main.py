@@ -6,7 +6,7 @@ def test_main_not_a_repo_waits_for_enter(tmp_path, monkeypatch, capsys):
     calls = []
     monkeypatch.setattr("builtins.input", lambda prompt="": calls.append(prompt) or "")
     assert main([str(tmp_path)]) == 1
-    assert "git 저장소가 아닙니다" in capsys.readouterr().out and len(calls) == 1
+    assert "Not a git repository" in capsys.readouterr().out and len(calls) == 1
 
 
 def test_main_opens_repo_root_from_subdir(repo, monkeypatch):

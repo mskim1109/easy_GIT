@@ -182,10 +182,10 @@ def unstage(repo: Path, change: FileChange) -> None:
 
 def commit(repo: Path, message: str) -> tuple[bool, str]:
     if not message.strip():
-        return False, "커밋 메시지가 비어 있습니다."
+        return False, "Commit message is empty."
     try:  # --quiet: stage된 것이 없으면 종료 코드 0, 있으면 1(GitError)
         run_git(repo, "diff", "--cached", "--quiet")
-        return False, "Stage된 파일이 없습니다."
+        return False, "Nothing staged."
     except GitError:
         pass
     try:  # 훅은 평소처럼 돈다. --no-verify 금지.
