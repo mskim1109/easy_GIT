@@ -34,7 +34,11 @@ def git(root: Path, *args: str) -> str:
 
 async def settle(app, pilot):
     for _ in range(2):
-        await app.workers.wait_for_complete()
+        # DirectoryTree 의 _loader 는 끝나지 않는 worker 라 빼고 기다린다.
+        # 빈 목록을 넘기면 wait_for_complete 가 전부(_loader 포함)를 기다리므로 있을 때만 부른다.
+        busy = [w for w in app.workers if w.group != "_loader"]
+        if busy:
+            await app.workers.wait_for_complete(busy)
         await pilot.pause()
 
 
