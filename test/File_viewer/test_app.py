@@ -8,7 +8,7 @@ import file_viewer.files as files
 import file_viewer.gitstate as gitstate
 import file_viewer.shellops as shellops
 from textual.command import CommandList, CommandPalette
-from textual.widgets import OptionList, TextArea
+from textual.widgets import OptionList, Static, TextArea
 
 from file_viewer.app import ConfirmScreen, FileTree, FileViewerApp, MenuScreen
 
@@ -516,3 +516,13 @@ def test_priority_keys_under_modal_do_not_touch_main_screen(repo):
         assert not isinstance(app.screen, ConfirmScreen) and app.current_tab.editing
         assert (repo / "b.txt").read_bytes() == b"AGENT\n"
     run(repo, body)
+
+
+def test_empty_hint_matches_layout(repo):
+    # 좁으면 왼쪽 트리가 숨어 있으므로 안내도 t 키를 말한다.
+    async def body(app, pilot):
+        hint = app.query_one("#empty", Static)
+        assert "t" in str(hint.content) and "왼쪽" not in str(hint.content)
+        await pilot.resize_terminal(120, 40); await settle(app, pilot)
+        assert "왼쪽 트리" in str(hint.content)
+    run(repo, body, size=(52, 30))

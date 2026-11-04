@@ -182,6 +182,7 @@ class FileViewerApp(App):
         self.tree_screen = False  # 좁을 때 트리 화면을 보고 있는지
         self._poll_worker = None
         self._listing: dict[Path, list[str] | None] = {}  # 폴링 스레드만 읽고 쓴다
+        self._hint = Static(id="empty")  # 탭이 없을 때 안내. 첫 Resize 가 on_mount 보다 먼저 와서 미리 만든다
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -194,7 +195,7 @@ class FileViewerApp(App):
     def on_mount(self) -> None:
         self.theme = "nord"
         tabs = self.query_one("#tabs", TabbedContent)
-        tabs.mount(Static("왼쪽 트리에서 파일을 고르세요", id="empty"),
+        tabs.mount(self._hint,
                    before=tabs.get_child_by_type(ContentSwitcher))
         self._load_state(self.query_one("#tree", FileTree))
         self.apply_layout()
@@ -269,6 +270,8 @@ class FileViewerApp(App):
         else:
             tree.display, tabs.display = self.tree_shown, True
             tree.styles.width = self.tree_width
+        self._hint.update(
+            "t 를 눌러 트리에서 파일을 고르세요" if self.narrow else "왼쪽 트리에서 파일을 고르세요")
 
     def action_toggle_tree(self) -> None:
         if self.narrow:
@@ -324,7 +327,7 @@ class FileViewerApp(App):
         self._update_empty()
 
     def _update_empty(self) -> None:
-        self.query_one("#empty").display = not self.tab_ids
+        self._hint.display = not self.tab_ids
 
     def open_external(self, path: Path) -> None:
         try:
