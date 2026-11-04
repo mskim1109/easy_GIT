@@ -91,6 +91,18 @@ def one_line(s: str) -> Text:
     return Text(s, no_wrap=True, overflow="ellipsis")
 
 
+STATUS_COLORS = {"M": "#E2C08D", "A": "#73C991", "D": "#C74E39", "R": "#4EC9B0"}  # VS Code git 표시 색
+
+
+def status_prompt(label: str, change: gitio.FileChange | None) -> Text:
+    """파일 줄이면 상태 글자(M/A/D/R)에 색을 입힌다. 글자는 들여쓰기 바로 뒤에 있다."""
+    text = one_line(label)
+    if change is not None and change.status in STATUS_COLORS:
+        at = len(label) - len(label.lstrip(" "))
+        text.stylize(STATUS_COLORS[change.status], at, at + 1)
+    return text
+
+
 def commit_message(c: gitio.Commit) -> str:
     when = datetime.fromtimestamp(c.when).strftime("%Y-%m-%d %H:%M")
     text = f"{c.short}  {c.subject}\n{c.author} · {when}"
@@ -125,7 +137,7 @@ class CommitScreen(ModalScreen[str | None]):
     CommitScreen { align: center middle; }
     CommitScreen > Vertical { width: 80%; height: auto; border: round $primary; background: $surface; padding: 0 1; }
     """
-    BINDINGS = [Binding("escape", "cancel", "취소")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -145,7 +157,7 @@ class ResultScreen(ModalScreen[None]):
     ResultScreen > Vertical { width: 80%; height: auto; max-height: 80%; border: round $error; background: $surface; padding: 0 1; }
     ResultScreen VerticalScroll { height: auto; max-height: 30; }
     """
-    BINDINGS = [Binding("escape", "close", "닫기"), Binding("enter", "close", "닫기")]
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("enter", "close", "Close")]
 
     def __init__(self, text: str) -> None:
         super().__init__()
@@ -210,16 +222,16 @@ class EasyGitApp(App):
     Screen.-narrow.-page-diff #right { display: block; }
     """
     BINDINGS = [
-        Binding("v", "toggle_view", "보기 전환"),
-        Binding("n", "next_change", "다음 변경"),
-        Binding("p", "prev_change", "이전 변경"),
+        Binding("v", "toggle_view", "View"),
+        Binding("n", "next_change", "Next change"),
+        Binding("p", "prev_change", "Prev change"),
         Binding("space", "toggle_stage", "Stage"),
-        Binding("c", "commit", "커밋"),
-        Binding("r", "reload", "새로 고침"),
-        Binding("escape", "back", "목록으로", show=False),
-        Binding("left", "fold(False)", "폴더 접기", show=False),
-        Binding("right", "fold(True)", "폴더 펴기", show=False),
-        Binding("q", "quit", "닫기"),
+        Binding("c", "commit", "Commit"),
+        Binding("r", "reload", "Refresh"),
+        Binding("escape", "back", "Back", show=False),
+        Binding("left", "fold(False)", "Collapse", show=False),
+        Binding("right", "fold(True)", "Expand", show=False),
+        Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self, repo: Path, poll_interval: float = 1.0) -> None:
@@ -422,7 +434,7 @@ class EasyGitApp(App):
         self.query_one("#message", Static).update(message)
         self._files = {k: f for k, _, f in entries if f}
         lst = self.query_one("#files", OptionList)
-        lst.set_options([Option(one_line(label), id=k, disabled=k is None) for k, label, _ in entries])
+        lst.set_options([Option(status_prompt(label, f), id=k, disabled=k is None) for k, label, f in entries])
         if index is None:
             self.query_one(DiffView).show([], self._shown_mode())
         else:

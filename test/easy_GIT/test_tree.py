@@ -270,3 +270,35 @@ def test_dragged_width_is_kept_across_narrow_layout(repo):
             assert left.size.width == dragged
 
     asyncio.run(run())
+
+
+# --- 상태 글자 색 ---
+
+def test_status_letter_is_colored_by_kind():
+    from easy_git.app import STATUS_COLORS, status_prompt
+    for status, path in (("M", "a/app.py"), ("A", "new.py"), ("D", "old.py"), ("R", "b.py")):
+        label = "  " + f"{status} {path.split('/')[-1]}  +1 -0"
+        text = status_prompt(label, fc(path, status=status))
+        assert str(text) == label
+        assert [(s.start, s.end, str(s.style)) for s in text.spans] == [(2, 3, STATUS_COLORS[status])]
+    assert status_prompt("▾ src/", None).spans == []  # 폴더·묶음 제목은 색 없음
+
+
+def test_file_list_shows_colored_status_letters(repo):
+    _repo_with_folder(repo)
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            files = app.query_one("#files", OptionList)
+            prompt = files.get_option("unstaged:src/a.py").prompt
+            assert any(str(s.style) == "#E2C08D" for s in prompt.spans)
+
+    asyncio.run(run())
+
+
+def test_key_menu_labels_are_english():
+    from easy_git.app import CommitScreen, ResultScreen
+    labels = [b.description for cls in (EasyGitApp, CommitScreen, ResultScreen) for b in cls.BINDINGS]
+    assert labels and all(label.isascii() for label in labels), labels
