@@ -1,5 +1,6 @@
 """File_viewer 화면: 왼쪽 파일 트리 + 오른쪽 탭."""
 import asyncio
+import os
 import subprocess
 from functools import partial
 from pathlib import Path
@@ -138,6 +139,8 @@ class FileViewerApp(App):
         self.narrow = False
         self.tree_shown = True  # 넓을 때 사용자가 고른 값
         self.tree_screen = False  # 좁을 때 트리 화면을 보고 있는지
+        self._poll_worker = None
+        self._listing: dict[Path, list[str] | None] = {}  # 폴링 스레드만 읽고 쓴다
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -154,6 +157,61 @@ class FileViewerApp(App):
                    before=tabs.get_child_by_type(ContentSwitcher))
         self._load_state(self.query_one("#tree", FileTree))
         self.apply_layout()
+        self.set_interval(self.poll_interval, self.poll_once)
+
+    def poll_once(self) -> None:
+        """한 번 확인한다. 대상은 메인 스레드에서 모으고, 디스크·git 은 스레드에서 읽는다."""
+        if self._poll_worker is not None and self._poll_worker.is_running:
+            return  # 앞 확인이 아직 도는 중(느린 git). 겹쳐 돌리지 않는다
+        tree = self.query_one("#tree", FileTree)
+        tabs = [(t, t.path, t.key, t.deleted) for t in self.query(FileTab) if not t.editing]
+        dirs, todo = [], [tree.root]
+        while todo:
+            node = todo.pop()
+            if node.data is not None and node.allow_expand and node.is_expanded:
+                dirs.append(node.data.path)
+                todo.extend(node.children)
+        self._poll_worker = self._poll(tree, tabs, dirs)
+
+    @work(thread=True, group="poll")
+    def _poll(self, tree: FileTree, tabs: list, dirs: list[Path]) -> None:
+        # 화면을 옮기지 않는다: 여기서는 open_file·커서 이동·탭 전환을 하지 않는다(설계 §6).
+        for tab, path, key, deleted in tabs:
+            now = files.stat_key(path)
+            if now is None:
+                if not deleted:
+                    self.call_from_thread(self._mark_deleted, tab)
+            elif now != key or deleted:
+                self.call_from_thread(self._refresh_tab, tab)
+        listing = {}
+        for d in dirs:
+            try:
+                listing[d] = sorted(os.listdir(d))
+            except OSError:
+                listing[d] = None
+        prev, self._listing = self._listing, listing
+        if any(d in prev and prev[d] != names for d, names in listing.items()):
+            self.call_from_thread(tree.reload)  # 펼침 상태와 커서는 reload 가 지킨다
+        try:
+            state = gitstate.read_state(self.root)
+        except (gitstate.GitError, OSError):
+            return  # 이전 표시를 두고 다음 주기에 다시
+        if state != tree.state:
+            self.call_from_thread(tree.set_state, state)
+
+    def _refresh_tab(self, tab: FileTab) -> None:
+        if tab.editing or not tab.is_attached:  # 그 사이 편집을 시작했거나 닫힘
+            return
+        try:
+            tab.refresh_content(True)
+        except OSError:
+            pass  # 에이전트가 쓰는 중. 이전 내용을 두고 다음 주기에 다시 읽는다
+
+    def _mark_deleted(self, tab: FileTab) -> None:
+        if not tab.is_attached:
+            return
+        tab.deleted = True
+        tab.show_notice(f"지워진 파일입니다: {tab.path.relative_to(self.root).as_posix()}")
 
     def on_resize(self, event: events.Resize) -> None:
         self.apply_layout(event.size.width)  # 이 시점의 self.size 는 아직 옛 값이다

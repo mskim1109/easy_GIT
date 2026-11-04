@@ -1,8 +1,11 @@
 import asyncio
+import os
+import time
 
 from rich.style import Style
 
 import file_viewer.files as files
+import file_viewer.gitstate as gitstate
 import file_viewer.shellops as shellops
 from textual.command import CommandList, CommandPalette
 from textual.widgets import OptionList
@@ -259,3 +262,93 @@ def test_right_click_on_tab_opens_menu_for_that_file(repo):
         await pilot.click(app.query_one("#tabs").get_tab(tab.id), button=3); await settle(app, pilot)
         assert isinstance(app.screen, MenuScreen) and app.screen.path == repo / "config.json"
     run(repo, body)
+
+
+def _commit_a(repo):
+    write(repo, "a.txt", "a\n"); git(repo, "add", "a.txt"); git(repo, "commit", "-m", "a")
+
+
+async def _for(app, pilot, seconds):
+    """seconds 동안 settle 을 반복한다(그 사이 폴링이 여러 번 돈다)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        await settle(app, pilot)
+        await pilot.pause(0.05)
+
+
+def test_open_tab_follows_external_edit(repo):
+    _commit_a(repo)
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        write(repo, "a.txt", "AGENT\n")
+        await wait_until(lambda: "AGENT" in app.current_tab.loaded.text, app, pilot)
+    run(repo, body, poll_interval=0.1)
+
+
+def test_refresh_keeps_scroll(repo):
+    lines = "".join(f"line {i}\n" for i in range(200))
+    write(repo, "long.txt", lines)
+    async def body(app, pilot):
+        tab = await _open(app, pilot, repo / "long.txt")
+        scroll = tab.query_one("#body")
+        scroll.scroll_to(y=50, animate=False); await settle(app, pilot)
+        assert scroll.scroll_y == 50
+        write(repo, "long.txt", lines.replace("line 150\n", "line 150 CHANGED\n"))
+        await wait_until(lambda: "CHANGED" in tab.loaded.text, app, pilot)
+        await settle(app, pilot)
+        assert scroll.scroll_y == 50
+    run(repo, body, poll_interval=0.1)
+
+
+def test_new_file_gets_plus_and_does_not_steal_view(repo):
+    _commit_a(repo)
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        tree = app.query_one("#tree", FileTree)
+        write(repo, "new.txt", "x")
+        def has_plus():
+            n = next((n for n in tree.root.children if n.data.path.name == "new.txt"), None)
+            return n is not None and tree.render_label(n, Style(), Style()).plain.endswith(" +")
+        await wait_until(has_plus, app, pilot)
+        assert app.current_tab.path == repo / "a.txt" and len(app.tab_ids) == 1
+    run(repo, body, poll_interval=0.1)
+
+
+def test_deleted_open_file_keeps_tab(repo):
+    _commit_a(repo)
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        (repo / "a.txt").unlink()
+        await wait_until(lambda: app.current_tab.deleted, app, pilot)
+        assert "지워진 파일" in app.current_tab.notice and len(app.tab_ids) == 1
+    run(repo, body, poll_interval=0.1)
+
+
+def test_poll_survives_git_error(repo, monkeypatch):
+    _commit_a(repo)
+    calls = []
+    def boom(root):
+        calls.append(root)
+        raise gitstate.GitError("index.lock")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        monkeypatch.setattr(gitstate, "read_state", boom)
+        await _for(app, pilot, 0.5)
+        assert calls and app.is_running and len(app.tab_ids) == 1
+    run(repo, body, poll_interval=0.1)
+
+
+def test_poll_survives_unreadable_file(repo, monkeypatch):
+    _commit_a(repo)
+    calls = []
+    def locked(path):
+        calls.append(path)
+        raise PermissionError("잠김")
+    async def body(app, pilot):
+        tab = await _open(app, pilot, repo / "a.txt")
+        monkeypatch.setattr(files, "load", locked)
+        p = repo / "a.txt"; st = p.stat()
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        await _for(app, pilot, 0.5)
+        assert calls and app.is_running and tab.loaded.text == "a\n"
+    run(repo, body, poll_interval=0.1)
