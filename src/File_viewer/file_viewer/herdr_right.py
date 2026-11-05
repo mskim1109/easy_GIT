@@ -10,11 +10,21 @@ import sys
 from pathlib import Path
 
 
-def _herdr(*args: str) -> dict:
+def _herdr(*args: str, **run_kw) -> dict:
     out = subprocess.run([os.environ.get("HERDR_BIN_PATH", "herdr"), *args], capture_output=True, check=True,
-                         creationflags=subprocess.CREATE_NO_WINDOW)
+                         creationflags=subprocess.CREATE_NO_WINDOW, **run_kw)
     text = out.stdout.decode("utf-8").strip()
     return json.loads(text)["result"] if text else {}  # pane run 은 성공해도 출력이 없다
+
+
+def focused_cwd() -> Path | None:
+    """Herdr 에서 지금 포커스된 칸의 폴더(File_viewer --follow 용). Herdr 가 없거나 답이 이상하면 None."""
+    # HERDR_PANE_ID 가 있으면 Herdr 는 포커스된 칸이 아니라 그 칸(이 창을 띄운 칸)으로 답한다
+    env = {k: v for k, v in os.environ.items() if k != "HERDR_PANE_ID"}
+    try:
+        return Path(_herdr("pane", "current", env=env, timeout=5)["pane"]["cwd"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
 
 
 def main() -> int:

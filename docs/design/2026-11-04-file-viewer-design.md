@@ -148,6 +148,7 @@ File_viewer는 **Herdr**(코딩 에이전트용 터미널 멀티플렉서, 이 P
 
 - **시작 폴더:** 띄운 칸의 현재 폴더를 **그대로** 트리의 맨 위로 쓴다. easy_GIT과 달리 저장소 최상위로 올라가지 않는다 *(설계자 결정)*. 하위 폴더에서 띄워도 git 상태 표시는 그 폴더 아래 파일에 맞게 나온다. `File_viewer [경로]`로 직접 실행해도 똑같이 동작해야 한다. Herdr 없이 시험할 수 있어야 한다.
 - **Herdr에서 여는 법:** 사용자는 에이전트 칸 **오른쪽 칸**에 늘 켜 둔다. 오른쪽 칸을 직접 열고 거기서 실행하면 된다. Herdr 설정(`%APPDATA%\herdr\config.toml`)의 `[[keys.command]]`로 오른쪽에 칸을 열며 실행할 수 있는지는 확인이 필요하다. 된다면 키 하나를 걸어 둔다. easy_GIT의 `prefix+alt+e`, lazygit의 `prefix+alt+g`와 겹치지 않게 한다.
+- **따로 뜬 창(다른 모니터):** `File_viewer --follow`. Herdr 에서 포커스된 칸의 폴더로 시작하고, 1초마다 확인해 칸을 옮기면 트리 맨 위를 그 폴더로 바꾼다. 열린 탭은 그대로 둔다 *(설계자 결정)*. Herdr 키 `prefix+alt+shift+f` 가 `start` 로 새 창을 띄운다. 사용자 요청 2026-11-05.
 - **OS:** Windows 11. Herdr는 Windows 기본 콘솔 창(conhost) 안에서 돈다. Windows Terminal은 없다. conhost에서도 색과 선이 깨지지 않아야 한다.
 - **Herdr:** 0.9.5. custom command는 `cmd.exe /d /c`로 실행된다. 설정에 `host_cursor = "native"`가 들어 있다(IME 조합 위치용).
 - **한글:** 경로와 내용의 한글이 깨지지 않아야 한다(UTF-8, CP949).

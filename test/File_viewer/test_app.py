@@ -10,6 +10,7 @@ from rich.style import Style
 
 import file_viewer.files as files
 import file_viewer.gitstate as gitstate
+import file_viewer.herdr_right as herdr_right
 import file_viewer.shellops as shellops
 import file_viewer.viewer as viewer
 from textual.command import CommandList, CommandPalette
@@ -137,6 +138,33 @@ def test_draw_mermaid_real_program():
     chart = viewer.draw_mermaid("graph LR\nA[시작] -->|예| B[끝]")
     assert "시작" in chart and "예" in chart and "┌" in chart
     assert "그릴 수 없는" in viewer.draw_mermaid("pie\n\"a\" : 1")
+
+
+def test_follow_moves_tree_to_focused_pane_folder_and_keeps_tabs(repo, tmp_path, monkeypatch):
+    other = tmp_path / "다른칸"
+    write(other, "b.txt", "b\n"); write(repo, "a.txt", "a\n")
+    focused = [repo]
+    monkeypatch.setattr(herdr_right, "focused_cwd", lambda: focused[0])
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        tree = app.query_one("#tree", FileTree)
+        focused[0] = other  # 사용자가 다른 칸으로 옮겨 갔다
+        await wait_until(lambda: app.root == other.resolve()
+                         and any(n.data.path.name == "b.txt" for n in tree.root.children), app, pilot)
+        assert app.current_tab.path == repo / "a.txt"  # 열린 탭은 그대로
+    run(repo, body, poll_interval=0.05, follow=True)
+
+
+def test_without_follow_does_not_ask_herdr(repo, monkeypatch):
+    asked = []
+    monkeypatch.setattr(herdr_right, "focused_cwd", lambda: asked.append(1))
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        for _ in range(5):
+            await settle(app, pilot); await pilot.pause(0.06)
+        assert app.root == repo
+    run(repo, body, poll_interval=0.05)
+    assert not asked
 
 
 def test_html_title_and_o(repo, monkeypatch):

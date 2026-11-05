@@ -17,6 +17,7 @@ from textual.widgets.option_list import Option
 
 import file_viewer.files as files
 import file_viewer.gitstate as gitstate
+import file_viewer.herdr_right as herdr_right
 import file_viewer.shellops as shellops
 from file_viewer.viewer import FileTab
 
@@ -181,10 +182,11 @@ class FileViewerApp(App):
             return editing
         return True
 
-    def __init__(self, root: Path, poll_interval: float = 1.0):
+    def __init__(self, root: Path, poll_interval: float = 1.0, follow: bool = False):
         super().__init__()
         self.root = root
         self.poll_interval = poll_interval
+        self.follow = follow  # Herdr 에서 포커스된 칸의 폴더를 따라간다(따로 뜬 창)
         self.tab_ids: dict[Path, str] = {}
         self._tab_no = 0
         self.tree_width = 32
@@ -232,6 +234,12 @@ class FileViewerApp(App):
     @work(thread=True, group="poll", exit_on_error=False)  # 예상 못 한 예외로 앱을 끝내지 않는다
     def _poll(self, tree: FileTree, tabs: list, dirs: list[Path]) -> None:
         # 화면을 옮기지 않는다: 여기서는 open_file·커서 이동·탭 전환을 하지 않는다(설계 §6).
+        if self.follow:
+            cwd = herdr_right.focused_cwd()
+            cwd = cwd.resolve() if cwd is not None and cwd.is_dir() else None
+            if cwd is not None and cwd != self.root:
+                self.call_from_thread(self.set_root, cwd)
+                return  # 옛 폴더의 목록·git 은 볼 필요 없다. 다음 주기에 새 폴더로
         for tab, path, key, deleted in tabs:
             try:
                 now = files.stat_key(path)
@@ -257,6 +265,14 @@ class FileViewerApp(App):
             return  # 이전 표시를 두고 다음 주기에 다시
         if state != tree.state:
             self.call_from_thread(tree.set_state, state)
+
+    def set_root(self, root: Path) -> None:
+        """트리 맨 위를 바꾼다(--follow). 열린 탭은 그대로 둔다."""
+        self.root = root
+        tree = self.query_one("#tree", FileTree)
+        tree.root_path, tree.state = root, None
+        tree.path = root  # DirectoryTree 가 새 폴더로 다시 읽는다
+        self._load_state(tree)
 
     def _refresh_tab(self, tab: FileTab) -> None:
         if tab.editing or not tab.is_attached:  # 그 사이 편집을 시작했거나 닫힘
