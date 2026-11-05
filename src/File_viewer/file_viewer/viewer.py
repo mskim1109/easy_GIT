@@ -5,7 +5,6 @@ from rich.cells import cell_len
 from rich.markdown import Markdown as RichMarkdown
 from rich.segment import Segment
 from rich.style import Style
-from rich.syntax import Syntax
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.strip import Strip
@@ -13,19 +12,18 @@ from textual.widget import Widget
 from textual.widgets import Static, TabPane, TextArea
 
 import file_viewer.files as files
+from file_viewer.highlight import highlight_lines
 
 NUMBER_STYLE = Style(color="#616e88")
-# rich 는 토큰마다 테마 배경을 넣으므로, 강조한 줄은 줄 전체(번호·빈칸 포함)에 같은 배경을 깐다(얼룩 방지)
-CODE_BG = Syntax.get_theme("monokai").get_background_style()
 
 
 def code_lines(text: str, path: Path, highlight: bool) -> list[str | Text]:
-    """줄 목록. 강조하지 않으면 str 그대로 두고 그릴 때 Text 로 만든다(수 MB 도 즉시)."""
+    """줄 목록. 강조하지 않으면 str 그대로 두고 그릴 때 Text 로 만든다(수 MB 도 즉시).
+    강조는 easy_GIT 과 같은 VS Code Dark+ 색(highlight.py)."""
     body = text[:-1] if text.endswith("\n") else text
     if not highlight:
         return body.split("\n")
-    syntax = Syntax(body, Syntax.guess_lexer(str(path), body), theme="monokai")
-    return syntax.highlight(body).split("\n", allow_blank=True)[: body.count("\n") + 1]
+    return [Text.assemble(*parts) for parts in highlight_lines(body.split("\n"), str(path))]
 
 
 class Lines(Widget):
@@ -46,10 +44,8 @@ class Lines(Widget):
         self._md: RichMarkdown | None = None
         self._strips: list[Strip] = []
         self._md_width = -1
-        self._background: Style | None = None
 
-    def show_code(self, lines: list[str | Text], background: Style | None = None) -> None:
-        self._background = background
+    def show_code(self, lines: list[str | Text]) -> None:
         for line in lines:
             if isinstance(line, Text) and "\t" in line.plain:
                 line.expand_tabs(4)
@@ -88,8 +84,7 @@ class Lines(Widget):
         line = self._lines[y]
         text = Text(line) if isinstance(line, str) else line
         number = Segment(f"{y + 1:>{self._gutter - 1}} ", NUMBER_STYLE)
-        strip = Strip([number, *text.render(self.app.console)]).extend_cell_length(width)
-        return strip.apply_style(self._background) if self._background else strip
+        return Strip([number, *text.render(self.app.console)]).extend_cell_length(width)
 
 
 class FileTab(TabPane):
@@ -201,8 +196,7 @@ class FileTab(TabPane):
         else:
             self.shown_text = text
             self.highlighted = (self.key[1] if self.key else len(text)) <= files.BIG_FILE
-            self.query_one("#code", Lines).show_code(code_lines(text, self.path, self.highlighted),
-                                                     CODE_BG if self.highlighted else None)
+            self.query_one("#code", Lines).show_code(code_lines(text, self.path, self.highlighted))
             self._show("code")
         if keep_scroll:
             self.call_after_refresh(body.scroll_to, y=y, animate=False)
