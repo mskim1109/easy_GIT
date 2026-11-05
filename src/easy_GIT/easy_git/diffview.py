@@ -137,7 +137,7 @@ class DiffView(ScrollView):
         scroll_x, scroll_y = self.scroll_offset
         i, width = scroll_y + y, self.size.width
         if i >= len(self._cells):
-            return Strip.blank(width)
+            return Strip.blank(width, Style())  # style 이 None 이면 NO_COLOR 때 textual Monochrome 필터가 죽는다
         cursor = bool(self.rows) and i == self.cursor_row
         if self.mode == "side" and self.rows:
             left, right = self._cells[i]

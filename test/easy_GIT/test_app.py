@@ -326,3 +326,17 @@ def test_without_follow_does_not_ask_herdr(repo, monkeypatch):
 
     asyncio.run(run())
     assert not asked
+
+
+def test_no_color_env_does_not_crash(repo, monkeypatch):
+    # NO_COLOR 면 textual 이 Monochrome 필터를 거는데, 그 필터는 style 이 None 인 조각에서 죽는다
+    _repo_with_change(repo)
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    async def run():
+        app = EasyGitApp(repo)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            assert app.is_running and len(app.query_one(DiffView).rows) == 11
+
+    asyncio.run(run())
