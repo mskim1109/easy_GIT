@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import sys
 import os
+import shutil
 import time
 
 import pytest
@@ -10,6 +11,7 @@ from rich.style import Style
 import file_viewer.files as files
 import file_viewer.gitstate as gitstate
 import file_viewer.shellops as shellops
+import file_viewer.viewer as viewer
 from textual.command import CommandList, CommandPalette
 from textual.widgets import OptionList, Static, TextArea
 
@@ -100,6 +102,41 @@ def test_md_rendered_then_raw(repo):
         await pilot.press("v"); await settle(app, pilot)
         assert not tab.md_rendered and _shown(tab) == ["code"]
     run(repo, body)
+
+
+def test_md_mermaid_chart_drawn_under_code_off_screen_thread(repo, monkeypatch):
+    import threading
+    threads = []
+    def fake(src):
+        threads.append(threading.current_thread())
+        return "<<CHART " + src.splitlines()[0] + ">>"
+    monkeypatch.setattr(viewer, "CHARTS", {})
+    monkeypatch.setattr(viewer, "draw_mermaid", fake)
+    write(repo, "d.md", "# 제목\n\n```mermaid\ngraph LR\nA --> B\n```\n\n끝\n")
+    async def body(app, pilot):
+        tab = await _open(app, pilot, repo / "d.md")
+        md = tab.query_one("#md")
+        await wait_until(lambda: any("<<CHART graph LR>>" in s.text for s in md._strips), app, pilot)
+        texts = [s.text.strip() for s in md._strips]
+        code = next(i for i, t in enumerate(texts) if t.startswith("A --> B"))
+        chart = next(i for i, t in enumerate(texts) if "<<CHART" in t)
+        assert code < chart < texts.index("끝")  # 코드 바로 밑, 다음 문단 위
+        await pilot.press("v"); await settle(app, pilot)  # 원문 보기에는 그림이 없다
+        assert not any("<<CHART" in str(line) for line in tab.query_one("#code")._lines)
+    run(repo, body)
+    assert threads and threading.main_thread() not in threads  # 0.4초씩 걸려 화면 스레드에서 그리면 멈춘다
+
+
+def test_draw_mermaid_without_program_says_so(monkeypatch):
+    monkeypatch.setenv("PATH", "")
+    assert "mermaid-ascii" in viewer.draw_mermaid("graph LR\nA --> B")
+
+
+@pytest.mark.skipif(not shutil.which("mermaid-ascii"), reason="mermaid-ascii 가 PATH 에 없음")
+def test_draw_mermaid_real_program():
+    chart = viewer.draw_mermaid("graph LR\nA[시작] -->|예| B[끝]")
+    assert "시작" in chart and "예" in chart and "┌" in chart
+    assert "그릴 수 없는" in viewer.draw_mermaid("pie\n\"a\" : 1")
 
 
 def test_html_title_and_o(repo, monkeypatch):

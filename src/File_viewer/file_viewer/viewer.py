@@ -1,11 +1,14 @@
 """탭 한 장: 파일 내용을 종류에 맞게 보여준다."""
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from rich.cells import cell_len
-from rich.markdown import Markdown as RichMarkdown
+from rich.markdown import CodeBlock, Markdown as RichMarkdown
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
+from textual import work
 from textual.containers import VerticalScroll
 from textual.strip import Strip
 from textual.widget import Widget
@@ -24,6 +27,42 @@ def code_lines(text: str, path: Path, highlight: bool) -> list[str | Text]:
     if not highlight:
         return body.split("\n")
     return [Text.assemble(*parts) for parts in highlight_lines(body.split("\n"), str(path))]
+
+
+# mermaid 코드 → 글자 그림. 프로그램을 띄우는 데만 0.4초가 걸려 화면 스레드 밖에서 채우고, 같은 코드는 다시 그리지 않는다.
+CHARTS: dict[str, str] = {}  # ponytail: 비우지 않음(그림 하나 수 KB). 오래 켜 두고 수천 개를 열면 LRU 로
+
+
+def draw_mermaid(src: str) -> str:
+    """PATH 의 mermaid-ascii 로 그린다(1.6.1 이상이어야 한글 이름표가 깨지지 않는다). 못 그리면 까닭 한 줄."""
+    try:
+        out = subprocess.run(["mermaid-ascii", "-f", "-"], input=src.encode("utf-8"), capture_output=True,
+                             timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+    except FileNotFoundError:
+        return "(mermaid-ascii 가 PATH 에 없어 그림을 그리지 못했습니다)"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"(mermaid 그림 실패: {e})"
+    if out.returncode != 0:
+        return "(그릴 수 없는 mermaid 종류입니다)"
+    return out.stdout.decode("utf-8", "replace").rstrip()
+
+
+class _Fence(CodeBlock):
+    """``` 코드 블록. mermaid 면 바로 밑에 글자 그림을 붙인다."""
+
+    def __rich_console__(self, console, options):
+        yield from super().__rich_console__(console, options)
+        if self.lexer_name == "mermaid":
+            # 줄을 접으면 선이 끊기므로 칸 폭에서 자른다
+            yield Text(CHARTS.get(str(self.text).rstrip(), "(mermaid 그림 그리는 중…)"), no_wrap=True, overflow="crop")
+
+
+class Markdown(RichMarkdown):
+    elements = {**RichMarkdown.elements, "fence": _Fence}
+
+
+def mermaid_sources(md: RichMarkdown) -> list[str]:
+    return [t.content.rstrip() for t in md.parsed if t.type == "fence" and t.info.partition(" ")[0] == "mermaid"]
 
 
 class Lines(Widget):
@@ -58,8 +97,21 @@ class Lines(Widget):
         self.refresh(layout=True)
 
     def show_markdown(self, text: str) -> None:
-        self._md, self._md_width = RichMarkdown(text), -1
+        self._md, self._md_width = Markdown(text), -1
         self.add_class("wrap")
+        self.refresh(layout=True)
+        todo = list(dict.fromkeys(s for s in mermaid_sources(self._md) if s not in CHARTS))
+        if todo:
+            self._draw_charts(todo)
+
+    @work(thread=True, group="mermaid", exit_on_error=False)
+    def _draw_charts(self, todo: list[str]) -> None:
+        with ThreadPoolExecutor() as pool:  # 그림마다 0.4초라 한꺼번에 띄운다
+            CHARTS.update(zip(todo, pool.map(draw_mermaid, todo)))
+        self.app.call_from_thread(self._redraw_md)
+
+    def _redraw_md(self) -> None:
+        self._md_width = -1  # 폭이 그대로여도 다시 그린다
         self.refresh(layout=True)
 
     def get_content_width(self, container, viewport) -> int:
