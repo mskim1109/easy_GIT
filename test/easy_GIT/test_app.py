@@ -2,7 +2,7 @@ import asyncio
 
 from textual.widgets import Input, OptionList
 
-from easy_git import gitio
+from easy_git import gitio, herdr
 from easy_git.app import CommitScreen, EasyGitApp, ResultScreen, layout_for, rel_time
 from easy_git.diffview import DiffView
 from easy_git.gitio import commits, working_changes
@@ -286,3 +286,43 @@ def test_git_errors_from_user_keys_are_notified(repo, monkeypatch):
             assert app.is_running and notes == ["fatal: index.lock exists"] * 2
 
     asyncio.run(run())
+
+
+def test_follow_switches_to_focused_pane_repo_and_stays_on_non_repo(repo, tmp_path, monkeypatch):
+    _repo_with_change(repo)
+    other, plain = tmp_path / "다른", tmp_path / "plain"
+    git(tmp_path, "init", "-b", "main", str(other)); plain.mkdir()
+    write(other, "x/b.txt", "b\n"); git(other, "add", "."); git(other, "commit", "-m", "다른 저장소")
+    focused = [repo]
+    monkeypatch.setattr(herdr, "focused_cwd", lambda: focused[0])
+
+    async def run():
+        app = EasyGitApp(repo.resolve(), poll_interval=0.05, follow=True)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot)
+            focused[0] = plain  # 저장소가 아닌 칸: 지금 저장소에 머문다
+            await pilot.pause(0.3); await settle(app, pilot)
+            assert app.repo == repo.resolve()
+            focused[0] = other / "x"  # 다른 저장소의 하위 폴더 칸
+            commits_list = app.query_one("#commits", OptionList)
+            for _ in range(30):
+                await pilot.pause(0.05); await settle(app, pilot)
+                if any("다른 저장소" in p for p in _prompts(commits_list)):
+                    break
+            assert app.repo == other.resolve() and any("다른 저장소" in p for p in _prompts(commits_list))
+
+    asyncio.run(run())
+
+
+def test_without_follow_does_not_ask_herdr(repo, monkeypatch):
+    _repo_with_change(repo)
+    asked = []
+    monkeypatch.setattr(herdr, "focused_cwd", lambda: asked.append(1))
+
+    async def run():
+        app = EasyGitApp(repo, poll_interval=0.05)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await settle(app, pilot); await pilot.pause(0.3)
+
+    asyncio.run(run())
+    assert not asked

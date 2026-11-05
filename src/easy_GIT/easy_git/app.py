@@ -16,7 +16,7 @@ from textual.widgets import Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
-from easy_git import gitio
+from easy_git import gitio, herdr
 from easy_git.diffview import DiffView, colored
 
 NARROW_BELOW = 90
@@ -234,10 +234,11 @@ class EasyGitApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, repo: Path, poll_interval: float = 1.0) -> None:
+    def __init__(self, repo: Path, poll_interval: float = 1.0, follow: bool = False) -> None:
         super().__init__()
         self.repo = repo
         self.poll_interval = poll_interval
+        self.follow = follow  # Herdr 에서 포커스된 칸의 저장소를 따라간다(따로 뜬 창)
         self.view_mode = "unified"
         self.message_text = ""
         self.layout_name = "wide"
@@ -383,12 +384,24 @@ class EasyGitApp(App):
     @work(thread=True, group="poll")
     def _check_changes(self) -> None:
         try:
+            if self.follow:
+                cwd = herdr.focused_cwd()
+                root = gitio.repo_root(cwd) if cwd is not None else None
+                if root is not None and root != self.repo:  # 저장소가 아닌 칸이면 지금 저장소에 머문다
+                    self.call_from_thread(self.set_repo, root)
+                    return
             snap = gitio.snapshot(self.repo)
         except GIT_ERRORS:
-            return  # index.lock 등: 다음 주기에 다시
+            return  # index.lock, 사라진 칸 폴더 등: 다음 주기에 다시
         if snap != self._snap:
             self._snap = snap
             self.call_from_thread(self.reload, True)
+
+    def set_repo(self, repo: Path) -> None:
+        """다른 저장소로 바꾼다(--follow). 접힌 폴더는 옛 저장소 것이라 잊는다."""
+        self.repo = repo
+        self._collapsed.clear()
+        self.reload(True)
 
     # --- 커밋 목록 ---
 
