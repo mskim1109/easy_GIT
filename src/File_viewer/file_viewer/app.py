@@ -162,7 +162,8 @@ class FileViewerApp(App):
         Binding("v", "toggle_md", "md 보기"),
         Binding("o", "open_external", "열기"),
         Binding("m", "menu", "메뉴"),
-        Binding("e", "edit", "편집"),
+        # 한글 입력 상태에서는 e 가 'ㄷ' 조합으로 먹혀 앱에 오지 않는다. Ctrl 조합은 입력기가 건드리지 않는다.
+        Binding("e,ctrl+e", "edit", "편집", key_display="e/^e"),
         Binding("ctrl+s", "save", "저장"),
         # TextArea(tab_behavior=indent)가 Esc 를 먼저 먹으므로 priority. 편집 중에만 켜진다(check_action).
         Binding("escape", "stop_edit", "편집 끝", priority=True),

@@ -464,6 +464,16 @@ def test_editing_keys_go_to_editor(repo):
     run(repo, body)
 
 
+def test_ctrl_e_starts_edit_even_with_korean_ime(repo):
+    # 한글 입력 상태에서는 e 가 'ㄷ' 조합으로 먹혀 앱에 오지 않는다. Ctrl 조합은 입력기가 건드리지 않는다.
+    write(repo, "a.txt", "a\n")
+    async def body(app, pilot):
+        await _open(app, pilot, repo / "a.txt")
+        await pilot.press("ctrl+e"); await settle(app, pilot)
+        assert app.current_tab.editing
+    run(repo, body)
+
+
 def test_editing_tab_not_auto_refreshed(repo):
     write(repo, "a.txt", "a\n")
     async def body(app, pilot):
